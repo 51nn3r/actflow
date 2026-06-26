@@ -1,12 +1,10 @@
-"""Готовые задачи общего назначения: вход, терминал, управляющий узел."""
-
 from __future__ import annotations
 
 from .task import Task
 
 
 class Input(Task):
-    """Точка входа графа: пробрасывает поданное значение в связь 'next'."""
+    """Graph entry point: forwards the received value through the 'next' link."""
 
     def execute(self, inputs, ctx):
         value = next(iter(inputs.values()))
@@ -15,7 +13,7 @@ class Input(Task):
 
 
 class Terminal(Task):
-    """Терминал: выводит пришедшее значение наружу графа."""
+    """Emits the received value as a graph output."""
 
     def execute(self, inputs, ctx):
         value = next(iter(inputs.values()))
@@ -24,9 +22,8 @@ class Terminal(Task):
 
 
 class Tap(Task):
-    """Управляющий узел: выполняет действие (лог, метрика, сторож, остановка)
-    и прозрачно пробрасывает значение в связь 'next'.
-    action получает (ctx, value) и может дёргать ctx.control."""
+    """Runs a side-effect action then forwards the value through the 'next' link.
+    action(ctx, value) — may call ctx.control to steer the executor."""
 
     def __init__(self, action):
         self.action = action

@@ -1,8 +1,3 @@
-"""actflow — исполнение графов задач с двухуровневой моделью узла.
-
-Тело — чистый такт; контроллеры ввода/вывода — вневременная скобка вокруг него.
-Публичный интерфейс: задача, готовые узлы, пакет, контроллеры, исполнители."""
-
 from .core import Packet, TaskResult, Ready, Wait, WaitUntil
 from .task import Task
 from .node import Node, Ctx

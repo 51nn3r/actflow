@@ -1,12 +1,3 @@
-"""Парные контроллеры — обратимая скобка вокруг тела.
-
-Контроллер ввода (вневременной): принимает пакеты в очереди по ярлыкам,
-сигналит готовность (poll), собирает входы при запуске (collect).
-Контроллер вывода (вневременной): размечает результат тела для раскладки.
-
-Договариваются через квитанцию: collect возвращает «что запомнить»,
-исполнитель проносит её до выхода (emit)."""
-
 from __future__ import annotations
 
 from collections import deque
@@ -15,14 +6,11 @@ from .core import Ready, Wait
 
 
 class InputController:
-    """Состояние входа узла: по очереди на каждый ожидаемый ярлык.
+    """Node input state: one FIFO queue per expected label.
 
-    Маршрутизация пакета:
-      - ярлык совпал с ожидаемым -> в его очередь;
-      - ярлык неизвестен -> в первый ещё не связанный слот по порядку.
-
-    poll  — сигнал готовности (по умолчанию: в каждой очереди есть пакет);
-    collect — собрать и изъять входы при запуске (по одному из очереди, FIFO)."""
+    Packet routing: known label → its queue; unknown → first unbound slot.
+    poll    — readiness check (default: every queue non-empty)
+    collect — dequeue one item per slot and return with a receipt"""
 
     def __init__(self, labels: tuple[str, ...]):
         self.labels = labels or ("in",)
@@ -59,15 +47,13 @@ class InputController:
         return Ready()
 
     def collect(self):
-        # вернуть входы для тела и квитанцию, изъяв их из очередей
         inputs = {lab: self.queues[lab].popleft().value for lab in self.labels}
 
         return inputs, None
 
 
 class OutputController:
-    """Стандартный выход: помечает результат ярлыком-типом узла,
-    если задача не указала ярлык явно. receipt не используется."""
+    """Stamps each result with the node's type label if the task didn't set one."""
 
     def __init__(self, type_label: str):
         self.type_label = type_label

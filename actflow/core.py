@@ -1,5 +1,3 @@
-"""Базовые типы: пакет данных, адресованный результат, исходы готовности."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -8,50 +6,43 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Packet:
-    """Конверт над значением. Неизменяем: один результат можно направить
-    в несколько узлов без копий.
+    """Immutable value envelope; routable to multiple nodes without copying.
 
-    value — нагрузка, с ней работает тело;
-    label — ярлык типа, адрес слота в получателе."""
+    value — payload the body works with;
+    label — destination slot in the receiving node."""
 
     value: Any
     label: str
 
     def relabel(self, label: str) -> "Packet":
-        # смена ярлыка = выбор другого слота; нагрузка та же
         return replace(self, label=label)
 
 
 @dataclass(frozen=True)
 class TaskResult:
-    """Адресованный результат тела: данные и узел-получатель.
-    Слот внутри получателя выбирается по ярлыку (label) при доставке."""
+    """Addressed result: data plus the target node and slot."""
 
     value: Any
     node: "Node"
-    label: str | None = None     # None — пометить ярлыком-типом узла-источника
+    label: str | None = None  # None — use the source node's type label
 
-
-# ── исходы опроса готовности (что контроллер ввода отвечает на пакет) ──
 
 class Verdict:
-    """База для исходов готовности."""
+    pass
 
 
 @dataclass(frozen=True)
 class Ready(Verdict):
-    """Узел готов к запуску. Сигнал готовности; входы собирает collect()
-    в момент запуска (а не при опросе), чтобы накопление в очереди между
-    опросами не плодило устаревшие снимки."""
+    """Node is ready to run."""
 
 
 @dataclass(frozen=True)
 class Wait(Verdict):
-    """Не готов; ждать только новых данных."""
+    """Not ready; wait for new incoming data."""
 
 
 @dataclass(frozen=True)
 class WaitUntil(Verdict):
-    """Не готов, но разбудить не позже момента T (дедлайн батча)."""
+    """Not ready, but wake no later than this deadline (batch timeout)."""
 
     deadline: float

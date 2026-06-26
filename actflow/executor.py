@@ -1,9 +1,3 @@
-"""Исполнители: доставляют результаты в очереди, запускают готовые узлы,
-спят до завершения узла или ближайшего дедлайна, затем переопрашивают.
-
-Синхронный ждёт каждое тело на месте. Асинхронный запускает готовые тела
-разом и спит на их завершении; долгие и удалённые тела (корутины) прозрачны."""
-
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +9,7 @@ from .node import Ctx
 
 
 class Controller:
-    """Рычаги управления, доступные узлам через ctx.control."""
+    """Executor control handles exposed to nodes via ctx.control."""
 
     def __init__(self, executor):
         self._executor = executor
@@ -33,15 +27,14 @@ class Controller:
 
 
 class _Base:
-    """Общая логика: доставка пакетов через контроллеры ввода, учёт готовых
-    (без дублей) и ждущих по таймеру узлов, раскладка результатов."""
+    """Shared executor logic: deliver packets, track ready/waiting nodes, dispatch results."""
 
     def __init__(self):
         self.control = Controller(self)
         self.outputs: list = []
-        self._ready: list = []                 # узлы, готовые к запуску
-        self._ready_set: set = set()           # защита от повторной постановки
-        self._waiting: dict = {}               # узел -> дедлайн (батч по времени)
+        self._ready: list = []
+        self._ready_set: set = set()
+        self._waiting: dict = {}  # node → deadline (time-based batch)
         self._runs = 0
 
     def snapshot(self) -> dict:
@@ -69,7 +62,7 @@ class _Base:
         return node
 
     def _repoll_due(self):
-        # переопросить узлы, чей дедлайн наступил: батч-контроллер отдаст неполный
+        # re-poll nodes past their deadline; batch controller will yield a partial batch
         now = time.monotonic()
         for node, dl in list(self._waiting.items()):
             if dl <= now:
@@ -91,7 +84,6 @@ class _Base:
         self._deliver(value, start, label)
 
     def _start(self, node):
-        # собрать входы и подготовить вызов тела
         inputs, receipt = node.input.collect()
         self._runs += 1
         ctx = Ctx(node, self.control)
@@ -100,12 +92,12 @@ class _Base:
         return results, receipt
 
     def _after_run(self, node):
-        # узел мог остаться готовым на остатке очередей — переопросить
+        # node may still be ready if queues have remaining items
         self._handle(node, node.input.poll())
 
 
 class SyncExecutor(_Base):
-    """Готовые узлы — последовательно; каждое тело ждётся на месте."""
+    """Runs ready nodes sequentially; each body is awaited in place."""
 
     def run(self, start, value=None):
         self._seed(start, value)
@@ -131,8 +123,7 @@ class SyncExecutor(_Base):
 
 
 class AsyncExecutor(_Base):
-    """Запускает все готовые тела разом, спит на их завершении.
-    Дедлайны контроллеров ввода будят исполнитель не позже срока."""
+    """Launches all ready bodies concurrently; sleeps until completion or next deadline."""
 
     def __init__(self, max_parallel: int = 8):
         super().__init__()

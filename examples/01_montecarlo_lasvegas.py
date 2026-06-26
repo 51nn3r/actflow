@@ -1,16 +1,3 @@
-"""Пример 1. Монте-Карло -> Лас-Вегас: гонка двух проверов.
-
-Два односторонних вероятностных провера крутятся параллельно. Каждый может
-«доказать» ответ, только если его утверждение совпадает с истиной, и то с
-вероятностью p за попытку. Если истина True, провер с утверждением False не
-докажет никогда — его снимает победитель.
-
-Снятие соседа выражено узлом графа: первый дошедший до решающего узла
-останавливает исполнитель, и цикл проигравшего обрывается.
-
-Показывает: параллельную гонку, цикл через связь узла на себя,
-остановку соседней ветви управляющим узлом."""
-
 import asyncio
 import random
 
@@ -18,15 +5,15 @@ from actflow import Task, AsyncExecutor
 
 
 class Fork(Task):
-    """Запускает обоих проверов."""
+    """Spawns both provers."""
 
     def execute(self, inputs, ctx):
         return [ctx.to("t", None), ctx.to("f", None)]
 
 
 class Prover(Task):
-    """Односторонний Монте-Карло: свидетельствует, лишь когда claim == truth.
-    Иначе уходит на повтор по связи 'retry' (она ведёт на сам узел)."""
+    """One-sided Monte Carlo: produces a witness only when claim == truth,
+    otherwise retries via the 'retry' self-loop."""
 
     def __init__(self, claim, truth, p=0.25):
         self.claim = claim
@@ -42,8 +29,7 @@ class Prover(Task):
 
 
 class Decide(Task):
-    """Управляющий узел: первый победитель останавливает исполнитель
-    и выводит доказанный ответ наружу."""
+    """First winner stops the executor and emits the proven answer."""
 
     def execute(self, inputs, ctx):
         value = next(iter(inputs.values()))
@@ -60,9 +46,9 @@ def build(truth):
 
     fork.link("t", pt)
     fork.link("f", pf)
-    pt.link("retry", pt)             # цикл-повтор: узел на себя
+    pt.link("retry", pt)  # self-loop for retries
     pf.link("retry", pf)
-    pt.link("win", decide)           # оба ведут в один узел; сработает первый
+    pt.link("win", decide)  # both provers race to the same decide node
     pf.link("win", decide)
 
     return fork

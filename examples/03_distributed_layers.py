@@ -1,18 +1,3 @@
-"""Пример 3. Распределённое выполнение слоёв НС.
-
-Несколько рабочих узлов считают слои сети. Как только рабочий освобождается,
-он берёт следующую пару [слой, ввод] и считает. Слои идут последовательно:
-выход слоя i — вход слоя i+1.
-
-Параллельность здесь — между независимыми образцами в потоке: пока рабочий
-считает слой образца A, другой может считать тот же слой образца B. Чтобы
-ответы вышли в исходном порядке, на выходе стоит синхронизатор — пара
-контроллеров: вход помнит порядковый номер, выход отдаёт по возрастанию.
-
-Показывает: распределённую раздачу работы по мере освобождения, async-тела
-слоёв с разной задержкой, синхронизатор порядка как парные контроллеры,
-квитанцию вход->выход."""
-
 import asyncio
 import random
 
@@ -21,12 +6,12 @@ from actflow.control import InputController, OutputController
 from actflow.core import Ready, Wait
 
 
-LAYERS = 3                      # глубина сети
-SAMPLES = 6                     # образцов в потоке
+LAYERS = 3  # network depth
+SAMPLES = 6  # samples in the stream
 
 
 class Feed(Task):
-    """Подаёт образцы в сеть, помечая порядковым номером для синхронизатора."""
+    """Feeds samples into the network tagged with a sequence index for the synchronizer."""
 
     async def execute(self, inputs, ctx):
         items = next(iter(inputs.values()))
@@ -38,28 +23,26 @@ class Feed(Task):
 
 
 class Layer(Task):
-    """Один слой: считает с переменной задержкой (распределённый рабочий).
-    Пока не последний слой — отправляет результат себе же на следующий слой;
-    иначе — в синхронизатор вывода."""
+    """Computes one layer with variable delay (distributed worker).
+    Routes to itself for the next layer, or to the synchronizer when done."""
 
     async def execute(self, inputs, ctx):
         item = next(iter(inputs.values()))
-        await asyncio.sleep(random.uniform(0.01, 0.05))   # неравномерная работа
+        await asyncio.sleep(random.uniform(0.01, 0.05))
 
         item = dict(item)
-        item["value"] = item["value"] * 2 + 1             # «вычисление слоя»
+        item["value"] = item["value"] * 2 + 1
         item["layer"] += 1
 
         if item["layer"] < LAYERS:
-            return [ctx.to("layer", item)]                # следующий слой
+            return [ctx.to("layer", item)]
 
-        return [ctx.to("done", item)]                     # готово -> синхронизатор
+        return [ctx.to("done", item)]
 
 
 class OrderedInput(InputController):
-    """Вход синхронизатора: пропускает результаты строго по возрастанию idx.
-    Придерживает пришедшие не по порядку, отдаёт, когда подходит их черёд.
-    Запомненный idx уходит в квитанции на выход."""
+    """Synchronizer input: passes results in strict ascending idx order.
+    Holds out-of-order arrivals; the consumed idx travels to the output as a receipt."""
 
     def __init__(self, labels):
         super().__init__(labels)
@@ -81,12 +64,11 @@ class OrderedInput(InputController):
         idx = self._next
         self._next += 1
 
-        return {self._slot: item}, idx        # квитанция — порядковый номер
+        return {self._slot: item}, idx  # receipt = sequence index
 
 
 class OrderedOutput(OutputController):
-    """Выход синхронизатора: вешает запомненный idx (из квитанции) обратно
-    на результат. Здесь — просто метит, порядок уже восстановлен входом."""
+    """Synchronizer output: attaches the idx from the receipt back to the result."""
 
     def emit(self, results, receipt):
         out = []
@@ -97,7 +79,7 @@ class OrderedOutput(OutputController):
 
 
 class Collect(Task):
-    """Терминал-синхронизатор: выводит наружу значения в исходном порядке."""
+    """Synchronizer terminal: emits values as graph output in original order."""
 
     def execute(self, inputs, ctx):
         item = next(iter(inputs.values()))
@@ -107,13 +89,13 @@ class Collect(Task):
 
 def build():
     feed = Feed()()
-    layer = Layer()()                         # один узел-рабочий, много активаций
+    layer = Layer()()
     collect = Collect()()
-    collect.input = OrderedInput(("done",))   # синхронизатор порядка
+    collect.input = OrderedInput(("done",))
     collect.output = OrderedOutput("Collect")
 
     feed.link("layer", layer)
-    layer.link("layer", layer)                # слой за слоем на том же узле
+    layer.link("layer", layer)  # same node processes every layer in sequence
     layer.link("done", collect)
 
     return feed

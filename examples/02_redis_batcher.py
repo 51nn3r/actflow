@@ -1,16 +1,3 @@
-"""Пример 2. Система выполнения ИИ-задач: батчевание через redis.
-
-Задачи приходят по одной. Узел-групповщик копит их в батч и отправляет на
-обработку, когда батч заполнен ИЛИ истёк таймаут (чтобы одиночная задача не
-ждала вечно). Обработчик — асинхронное тело, которое кладёт батч в redis и
-ждёт ответа; redis замокан in-memory, но контракт async-тела настоящий.
-
-Батч по размеру-и-таймауту — это кастомный контроллер ввода: он отдаёт
-WaitUntil(T), пока батч не полон, и Ready, когда полон или время вышло.
-
-Показывает: кастомный контроллер ввода с дедлайном, пробуждение исполнителя
-по таймеру, async-тело с ожиданием внешней системы."""
-
 import asyncio
 import time
 
@@ -19,13 +6,12 @@ from actflow.control import InputController
 
 
 BATCH_SIZE = 4
-BATCH_TIMEOUT = 0.3        # сек: не ждать полный батч дольше этого
+BATCH_TIMEOUT = 0.3  # max wait for a full batch, seconds
 
 
 class BatchInput(InputController):
-    """Контроллер ввода-групповщик: копит пакеты в один слот.
-    Готов, когда набрался размер батча или истёк таймаут от первого пакета.
-    poll сигналит готовность/дедлайн, collect отдаёт весь батч и чистит."""
+    """Batching input controller: accumulates packets until size or timeout.
+    poll signals readiness or the next deadline; collect returns the full batch."""
 
     def __init__(self, labels):
         super().__init__(labels)
@@ -60,26 +46,25 @@ class BatchInput(InputController):
 
 
 class FakeRedis:
-    """Мок очереди: обработчик «забирает» батч и возвращает результат."""
+    """In-memory mock for an external processing queue."""
 
     @staticmethod
     async def process(batch):
-        await asyncio.sleep(0.05)        # имитация сетевой обработки
+        await asyncio.sleep(0.05)
 
-        return [x * x for x in batch]    # «модель» возвела в квадрат
+        return [x * x for x in batch]
 
 
 class Producer(Task):
-    """Поток задач из очереди: выдаёт по одной с интервалом (как поступление
-    из redis), остаток гонит на себя по связи 'loop'. Так батч наполняется
-    на лету, а не разом."""
+    """Emits one item at a time with a delay (simulating redis arrivals),
+    routes the remainder back via 'loop' so the batch fills gradually."""
 
     async def execute(self, inputs, ctx):
         items = next(iter(inputs.values()))
         if not items:
             return []
 
-        await asyncio.sleep(0.02)        # задачи приходят растянуто во времени
+        await asyncio.sleep(0.02)
         head, rest = items[0], items[1:]
         results = [ctx.to("batch", head)]
         if rest:
@@ -89,7 +74,7 @@ class Producer(Task):
 
 
 class Batcher(Task):
-    """Async-тело: получает готовый батч, отправляет в redis, ждёт ответ."""
+    """Receives a ready batch, sends it to redis, awaits the result."""
 
     async def execute(self, inputs, ctx):
         batch = next(iter(inputs.values()))
@@ -103,9 +88,9 @@ class Batcher(Task):
 def build():
     producer = Producer()()
     batcher = Batcher()()
-    batcher.input = BatchInput(("batch",))      # батчевый контроллер ввода
+    batcher.input = BatchInput(("batch",))
     producer.link("batch", batcher)
-    producer.link("loop", producer)             # остаток потока — на себя
+    producer.link("loop", producer)
 
     return producer
 
@@ -114,7 +99,7 @@ async def main():
     print(f"батч по размеру {BATCH_SIZE} или таймауту {BATCH_TIMEOUT}с")
     producer = build()
     ex = AsyncExecutor(max_parallel=4)
-    # 10 задач: должны лечь в батчи 4 + 4 + хвост 2 (по таймауту)
+    # 10 items: expected batches 4 + 4 + tail 2 (by timeout)
     result = await ex.run(producer, list(range(1, 11)))
 
     print("батчей-результатов:", len(result))

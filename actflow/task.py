@@ -1,20 +1,14 @@
-"""Базовый класс задачи. Вызов задачи создаёт узел графа, не исполняя его."""
-
 from __future__ import annotations
 
 from .node import Node
 
 
 class Task:
-    """Единица вычисления. Переопредели execute.
+    """Unit of computation. Override execute.
 
-    execute(inputs, ctx) -> список TaskResult, где inputs — словарь
-    {ярлык: значение}, собранный контроллером ввода, а ctx адресует
-    результаты по именам связей.
-
-    in_labels  — ярлыки входных слотов (что узел принимает);
-    type_label — ярлык результата по умолчанию.
-    Тело может быть обычной функцией (sync) или корутиной (async)."""
+    execute(inputs, ctx) → list[TaskResult]
+    inputs — {label: value} dict assembled by the input controller
+    The body may be a plain function (sync) or a coroutine (async)."""
 
     in_labels: tuple = ()
     type_label: str = ""

@@ -1,160 +1,113 @@
-# actflow — спецификация
+# actflow — specification
 
-Библиотека исполнения графов задач. Граф описывает, какие задачи выполняются
-и куда передают результаты; исполнитель прогоняет его, передавая данные между
-узлами. Поддерживает синхронный и асинхронный режим, в том числе удалённые и
-долгие задачи.
+[Русский](SPEC.ru.md)
 
-## 1. Базовая идея
+A task-graph execution library. The graph describes which tasks run and where they send their results; the executor drives it, passing data between nodes. Supports sync and async mode, including remote and long-running tasks.
 
-Задача только считает и возвращает результат — куда его направить, задаётся
-связями графа, а не самой задачей. Решение о запуске принимает исполнитель.
-Это даёт ему полный контроль над порядком, параллельностью и остановкой.
+## 1. Core idea
 
-Модель близка к функциональному стилю и к вычислительному графу: по рёбрам
-текут неизменяемые данные, узлы не делят общее изменяемое состояние.
+A task only computes and returns a result — where to route it is determined by the graph's links, not by the task. The executor decides when to run each node. This gives it full control over ordering, parallelism, and stopping.
 
-## 2. Два уровня по доступу ко времени
+The model is close to functional programming and to computation graphs: immutable data flows along edges, nodes share no mutable state.
 
-Всё в узле делится на два уровня. Делёж — по тому, виден ли ход времени.
+## 2. Two levels by time access
 
-**Временной уровень — тело (execute).** Чистая функция одного такта: получило
-значения, вернуло значения. Прошлого и будущего не видит, между тактами ходить
-не может, состояние не хранит.
+Everything in a node splits into two levels, divided by whether the passage of time is visible.
 
-**Вневременной уровень — контроллеры.** Видят все очереди узла и накопленный
-выход, держат состояние между тактами. Сюда выносится всё, что требует памяти
-через время и обзора очередей: готовность, выбор кандидата, порядок, сборка
-батча, разборка результата обратно.
+**Time-aware level — the body (execute).** A pure function of a single tick: receives values, returns values. It has no view of past or future, cannot span time between ticks, and holds no state.
 
-## 3. Пакет данных
+**Timeless level — controllers.** They see all node queues and accumulated output; they hold state between ticks. Everything that needs memory across time belongs here: readiness, candidate selection, ordering, batch assembly, result decomposition.
 
-По рёбрам течёт пакет — конверт над значением.
+## 3. Data packet
 
-    пакет = значение + ярлык типа
+A packet — an envelope around a value — flows along edges.
 
-**Значение** — то, с чем работает тело. **Ярлык типа** — адрес слота: куда
-пакет ляжет в узле-получателе. Пакет неизменяем: один результат можно направить
-в несколько узлов без копий, потому что никто его не мутирует. Если задаче нужна
-изменяемая версия — она копирует сама, осознанно (важно для тензоров: лишних
-копий нет).
+```
+packet = value + type label
+```
 
-Метаданные (порядковый номер для синхронизации и пр.) по графу не ездят — они
-живут в состоянии контроллеров узла, который их завёл (см. раздел 6).
+**Value** — what the body works with. **Type label** — the slot address: where the packet lands in the receiving node. The packet is immutable: one result can be routed to multiple nodes without copying. If a task needs a mutable copy, it copies explicitly (important for tensors: no redundant allocations).
 
-## 4. Маршрутизация по типу
+Metadata (sequence numbers for synchronization, etc.) does not travel with the packet — it lives in the controller state of the node that issued it (see section 6).
 
-Слот получателя определяется **ярлыком типа**, а не позицией прихода.
+## 4. Type-based routing
 
-Узел по умолчанию помечает результат ярлыком своего типа: узел `a` выдаёт
-данные с ярлыком `A`. Узел `b`, объявленный принимающим `[A, C]`, кладёт
-пришедший `A` в очередь для `A`, пришедший `C` — в очередь для `C`.
+The destination slot is determined by the **type label**, not by the order of arrival.
 
-Слоты узла заполняются типами при вставке в граф: по очереди, каждый тип —
-один раз; можно и явно. Если узел `d` хочет слать туда, где ждут `A`, он
-**меняет ярлык** результата на `A` перед отправкой — смена ярлыка есть выбор слота.
+By default, a node stamps its result with its own type label: node `a` produces data labeled `A`. Node `b`, declared as accepting `[A, C]`, routes incoming `A` to the `A` queue and incoming `C` to the `C` queue.
 
-## 5. Очереди входа и выбор кандидата
+Slots are bound to types when inserted into the graph: in declaration order, one type per slot; explicit binding is also possible. If node `d` wants to send where `A` is expected, it **changes the label** to `A` before sending — changing the label means selecting a slot.
 
-Каждый вход узла — именованная очередь (по ярлыку типа). Когда на один слот
-пришло несколько пакетов, встаёт вопрос: какой брать следующим. По умолчанию
-FIFO, но правило выбора сменное — это часть контроллера ввода.
+## 5. Input queues and candidate selection
 
-## 6. Парные контроллеры — обратимая скобка вокруг тела
+Each node input is a named queue (by type label). When multiple packets arrive at the same slot, the question is: which to take next. Default is FIFO, but the selection rule is replaceable — it's part of the input controller.
 
-Контроллер ввода и контроллер вывода работают как обратимая пара. Вход
-применяет преобразование, выход — обратное. Тело между ними не знает, что его
-обернули.
+## 6. Paired controllers — an invertible bracket around the body
 
-    вход: преобразование → тело: вычисление → выход: обратное преобразование
+The input and output controllers act as an invertible pair. The input applies a transformation; the output applies the inverse. The body in between doesn't know it's been wrapped.
 
-**Контроллер ввода** (вневременной): решает готовность, выбирает кандидата из
-очереди, задаёт порядок, собирает входы в то, что увидит тело (например,
-сворачивает временные шаги в батч).
+```
+input: transform → body: compute → output: inverse transform
+```
 
-**Контроллер вывода** (вневременной): разбирает результат тела обратно по
-очередям-выходам (разрезает батч на шаги), проставляет ярлыки и адреса.
+**Input controller** (timeless): decides readiness, selects from the queue, sets ordering, assembles inputs into what the body will see (e.g., folds time steps into a batch).
 
-Вход и выход одного узла договариваются через **квитанцию**: пропуская пакеты
-в тело, вход возвращает «что запомнить» (например, порядковый номер); исполнитель
-проносит квитанцию до выхода и отдаёт её вместе с результатом тела. Квитанция
-едет с задачей и переживает переход через сеть — в отличие от общей памяти, она
-работает в распределённом режиме.
+**Output controller** (timeless): decomposes the body's result back into output queues (splits a batch into steps), stamps labels and addresses.
 
-Применения пары — это разные «преобразование / обратное»:
+Input and output coordinate via a **receipt**: while passing packets to the body, the input returns "what to remember" (e.g., a sequence number); the executor carries it to the output and hands it in together with the body's result. The receipt travels with the task and survives network transit — unlike shared memory, it works in distributed mode.
 
-- **Синхронизация.** Вход помнит порядковый номер пропущенного пакета, выход
-  вешает его обратно и придерживает результаты, отдавая по возрастанию.
-  Восстанавливает порядок, сбитый разной скоростью обработки.
-- **Объединение–разъединение.** Вход сворачивает несколько пакетов в один
-  (временные шаги → батч), тело обрабатывает цельным объектом, выход разрезает
-  результат обратно. Один прогон НС по батчу вместо N прогонов по шагам.
-- **Нормализация–денормализация.** Вход приводит значения к рабочему виду
-  (масштаб, форма), тело считает в нём, выход возвращает к исходному виду.
+Examples of paired transforms:
 
-Обычному узлу контроллеры писать не надо — подставляются стандартные: вход —
-FIFO «по пакету из каждой очереди, готов когда все есть»; выход — пометить
-результат ярлыком-типом узла и разложить по связям.
+- **Synchronization.** Input records the sequence number; output reattaches it and holds results until they can be released in order. Restores ordering disrupted by uneven processing speed.
+- **Pack–unpack.** Input folds multiple packets into one batch; body processes the whole object; output splits the result back. One network pass per batch instead of N per item.
+- **Normalize–denormalize.** Input scales/reshapes values to working form; body computes; output converts back.
 
-## 7. Готовность и пробуждение
+Ordinary nodes don't need custom controllers — defaults are provided: input is FIFO ("one packet per slot, ready when all slots are non-empty"); output stamps with the node's type label and dispatches along links.
 
-Приём данных идёт через узел, не напрямую в очередь. Получив пакет, контроллер
-ввода сразу отвечает, готов ли запуск. Ответ — один из трёх:
+## 7. Readiness and wakeup
 
-    READY(inputs)    — запускай сейчас, вот собранные входы
-    WAIT             — не готов, ждать только новых данных
-    WAIT_UNTIL(T)    — не готов, но разбуди не позже момента T (дедлайн батча)
+Data is received through the node, not directly into the queue. When a packet arrives, the input controller immediately signals whether a run is ready. The answer is one of three:
 
-Засыпает и просыпается только исполнитель. Он собирает все дедлайны `T` и спит
-до «ближайший T или любая нода завершилась». Контроллер ввода своего потока и
-таймера не имеет — он лишь называет дедлайн, а будит исполнитель. Так батч
-по таймауту работает без отдельного потока и без активного ожидания.
+```
+READY           — run now
+WAIT            — not ready, wait for new data
+WAIT_UNTIL(T)   — not ready, but wake no later than T (batch deadline)
+```
 
-## 8. Тело: синхронное, асинхронное, удалённое
+Only the executor sleeps and wakes. It collects all deadlines T and sleeps until "a node completes or the nearest deadline T". The input controller has no thread or timer — it only names a deadline. This is how time-based batching works without a dedicated thread and without busy-waiting.
 
-Тело — это `execute`. Оно может быть:
+## 8. Body: sync, async, remote
 
-- синхронным — обычная функция, исполнитель ждёт её на месте;
-- асинхронным — корутина; долгая или удалённая работа (redis, другой узел)
-  выражается через `await`, исполнитель в это время спит и обрабатывает других.
+The body is `execute`. It can be:
 
-Исполнителю всё равно, считает тело локально или ждёт сеть: в async-режиме он
-вызвал `execute` всех готовых узлов и уснул; первая завершившаяся корутина
-разбудила его и отдала результат. Распределённость не требует ничего сверх
-этого — отдельного механизма возобновления нет.
+- **sync** — a plain function; the executor waits for it in place
+- **async** — a coroutine; long-running or remote work (redis, another node) is expressed via `await`, the executor sleeps and handles other nodes in the meantime
 
-## 9. Результат задачи
+The executor doesn't care whether the body computes locally or waits on the network: in async mode it called `execute` on all ready nodes and slept; the first completed coroutine woke it up. No separate resumption mechanism needed.
 
-Тело возвращает список адресованных результатов:
+## 9. Task result
 
-    TaskResult = (данные, узел-получатель)
+The body returns a list of addressed results:
 
-Обычно один результат и один получатель; список нужен для ветвления и fan-out.
-Слот внутри получателя выбирается по ярлыку типа (раздел 4). Команд нет.
-Вывод наружу графа — это отдельная терминальная задача, а не особый результат.
+```
+TaskResult = (data, target node)
+```
 
-## 10. Исполнитель
+Typically one result and one target; a list is needed for branching and fan-out. The slot within the target is selected by type label (section 4). Graph output is handled by a terminal task, not a special result type.
 
-Один обход, два режима:
+## 10. Executor
 
-- кладёт результаты завершившихся узлов в очереди получателей (через их
-  контроллер ввода), получает ответы готовности;
-- запускает все READY-узлы;
-- засыпает до «узел завершился или ближайший дедлайн T»;
-- проснувшись, повторяет.
+One loop, two modes:
 
-**Синхронный** ждёт каждое тело на месте (готовые узлы — последовательно).
-**Асинхронный** запускает готовые тела разом и спит на их завершении, с лимитом
-параллельности; долгие и удалённые тела прозрачны.
+- delivers results of completed nodes to recipient queues (via their input controller), receives readiness responses
+- launches all READY nodes
+- sleeps until "a node completes or the nearest deadline T"
+- wakes up and repeats
 
-Спящий всегда один — исполнитель — на условной переменной (sync) или
-`asyncio.wait` с таймаутом (async). Активного ожидания (спинлока) нет: при
-дедлайнах в доли секунды оно сожгло бы ядро впустую и в async задушило бы
-ожидающие сети корутины.
+**SyncExecutor** waits for each body in place (ready nodes run sequentially). **AsyncExecutor** launches all ready bodies at once and sleeps on their completion, with a parallelism cap; long-running and remote bodies are transparent.
 
-## 11. Управление через граф
+The sleeper is always one — the executor — on `asyncio.wait` with timeout (async) or `time.sleep` (sync). No busy-waiting: with sub-second deadlines a spinlock would burn a CPU core and in async mode would starve waiting coroutines.
 
-Управляющий код — обычный узел графа. Через контекст ему доступны рычаги
-исполнителя: остановить (мягко: текущие запуски доигрывают, новые не стартуют)
-и снимок состояния для логирования. Остановка соседней ветви, сторож, лог —
-всё выражается узлами, без внешних слушателей.
+## 11. Control through the graph
+
+Control code is a regular graph node. Through the context it accesses executor handles: stop (graceful: current runs finish, no new ones start) and a state snapshot for logging. Stopping a sibling branch, a watchdog, logging — all expressed as nodes, without external listeners.
