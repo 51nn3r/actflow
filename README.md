@@ -10,12 +10,12 @@ Full model description — [SPEC.md](SPEC.md).
 
 ```
 actflow/
-  core.py       data packet, addressed result, readiness verdicts
-  control.py    input/output controllers (default implementations)
-  node.py       graph node and body invocation context
-  task.py       base task class
+  core.py       Packet, Collected, TaskResult, readiness verdicts, context vars
+  control.py    InputController, OutputController, OrderedInputController
+  node.py       Node, LinkRef — graph slot and async execution
+  task.py       Task base class
   tasks.py      built-in tasks: Input, Terminal, Tap
-  executor.py   sync and async executors, control handles
+  executor.py   SyncExecutor, AsyncExecutor, Controller
 
 examples/
   01_montecarlo_lasvegas.py   prover race, sibling cancellation
@@ -26,50 +26,109 @@ examples/
 ## Run
 
 ```
-PYTHONPATH=. python examples/01_montecarlo_lasvegas.py
+cd actflow && pip install -e . && python examples/01_montecarlo_lasvegas.py
 ```
 
 ## API
 
-A task computes and routes its result by link name:
+### Task body
+
+`execute` receives named parameters (matched to input slots by source label) and returns a routing dict or a list of `TaskResult`:
 
 ```python
 class Double(Task):
-    def execute(self, inputs, ctx):
-        x = next(iter(inputs.values()))
-        return [ctx.to("next", x * 2)]
+    def execute(self, value) -> dict:
+        return {"next": value * 2}
 ```
 
-A graph is built from nodes with named links (self-links create cycles):
+`None` as a key sends the value to the graph output:
+
+```python
+class Terminal(Task):
+    def execute(self, value) -> dict:
+        return {None: value}
+```
+
+Async bodies are transparent — the executor awaits them automatically:
+
+```python
+class Fetch(Task):
+    async def execute(self, url) -> dict:
+        data = await http_get(url)
+        return {"next": data}
+```
+
+### Building a graph
+
+`task()` creates a node; `>>` wires nodes; `["name"]` selects a named output socket:
 
 ```python
 inp = Input()()
 dbl = Double()()
 end = Terminal()()
-inp.link("next", dbl)
-dbl.link("next", end)
+
+inp >> dbl >> end
 
 SyncExecutor().run(inp, 21)   # → [42]
 ```
 
-The body may be async — remote or long-running work is transparent:
+Named sockets and self-loops:
 
 ```python
-class Remote(Task):
-    async def execute(self, inputs, ctx):
-        data = await redis_call(...)
-        return [ctx.to("next", data)]
+class Retry(Task):
+    def execute(self, item) -> dict:
+        if done(item):
+            return {"out": item}
+        return {"retry": item}
+
+node = Retry()()
+node["retry"] >> node   # self-loop
+node["out"] >> sink
 ```
 
-Custom input behavior (batching, ordering) — replace the input controller:
+### Source label
+
+The source label is stamped on every outgoing packet and routes it to the matching input slot of the receiver. Set in `__init__`; defaults to the class name:
 
 ```python
-node.input = BatchInput(("batch",))
+w1 = Worker(label="w1")()
+w2 = Worker(label="w2")()
+
+class Collector(Task):
+    def execute(self, w1, w2) -> dict:   # slot names match labels
+        ...
 ```
 
-Control is expressed as graph nodes via `ctx.control`:
+For a simple graph (one node per class) no label config is needed — class names are unique by default.
+
+### Task state and control
+
+Inside `execute`, access node memory and executor control via `self`:
 
 ```python
-Tap(lambda ctx, v: ctx.control.stop())
-Tap(lambda ctx, v: print(ctx.control.snapshot()))
+class Counter(Task):
+    def execute(self, value) -> dict:
+        self.memory["n"] = self.memory.get("n", 0) + 1
+        if self.memory["n"] >= 10:
+            self.stop()
+        return {"next": value}
 ```
+
+Fan-out to the same link via `self.to()`:
+
+```python
+class Broadcast(Task):
+    async def execute(self, items) -> list:
+        return [self.to("out", item) for item in items]
+```
+
+### Custom controllers
+
+Pass a custom input controller in `__init__` for batching, ordering, etc.:
+
+```python
+batcher = Batcher(input_controller=BatchInput(("batch",)))()
+collect = Collect(input_controller=OrderedInputController(("done",)))()
+```
+
+`OrderedInputController` is built in — delivers packets in strict ascending `idx` order and passes `mark={"idx": n}` to the output controller.

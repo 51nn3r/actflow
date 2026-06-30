@@ -23,91 +23,112 @@ Everything in a node splits into two levels, divided by whether the passage of t
 A packet — an envelope around a value — flows along edges.
 
 ```
-packet = value + type label
+packet = value + source label
 ```
 
-**Value** — what the body works with. **Type label** — the slot address: where the packet lands in the receiving node. The packet is immutable: one result can be routed to multiple nodes without copying. If a task needs a mutable copy, it copies explicitly (important for tensors: no redundant allocations).
+**Value** — what the body works with. **Source label** — the slot address: where the packet lands in the receiving node. The packet is immutable: one result can be routed to multiple nodes without copying.
 
-Metadata (sequence numbers for synchronization, etc.) does not travel with the packet — it lives in the controller state of the node that issued it (see section 6).
+Metadata (sequence numbers for synchronization, etc.) does not travel with the packet — it lives in `Collected.mark`, produced by the input controller during `collect()` and consumed by the output controller during `emit()` within the same tick (see section 6).
 
-## 4. Type-based routing
+## 4. Source label and routing
 
-The destination slot is determined by the **type label**, not by the order of arrival.
+The destination slot is determined by the **source label**, not by the order of arrival.
 
-By default, a node stamps its result with its own type label: node `a` produces data labeled `A`. Node `b`, declared as accepting `[A, C]`, routes incoming `A` to the `A` queue and incoming `C` to the `C` queue.
+By default, a node stamps its result with its own source label: a node whose task has `label="A"` produces data labeled `A`. A receiving node with `execute(self, A, C)` routes incoming `A` to the `A` slot and `C` to the `C` slot.
 
-Slots are bound to types when inserted into the graph: in declaration order, one type per slot; explicit binding is also possible. If node `d` wants to send where `A` is expected, it **changes the label** to `A` before sending — changing the label means selecting a slot.
+**Label resolution** (first non-empty wins): `type_label` class var → `out_labels[0]` class var → `label` constructor arg → class name. For a simple graph with one node per class, the class name is unique and no explicit label config is needed.
+
+If two nodes of the same class send to the same collector, name them:
+
+```python
+w1 = Worker(label="w1")()
+w2 = Worker(label="w2")()
+
+class Collector(Task):
+    def execute(self, w1, w2) -> dict: ...
+```
+
+Unknown incoming label → auto-bound to the first free slot. Known label → its queue directly.
 
 ## 5. Input queues and candidate selection
 
-Each node input is a named queue (by type label). When multiple packets arrive at the same slot, the question is: which to take next. Default is FIFO, but the selection rule is replaceable — it's part of the input controller.
+Each node input is a named slot with a FIFO queue. When multiple packets arrive at the same slot, the default is FIFO, but the selection rule is replaceable — it's part of the input controller.
 
 ## 6. Paired controllers — an invertible bracket around the body
 
 The input and output controllers act as an invertible pair. The input applies a transformation; the output applies the inverse. The body in between doesn't know it's been wrapped.
 
 ```
-input: transform → body: compute → output: inverse transform
+collect → body: execute → emit
 ```
 
-**Input controller** (timeless): decides readiness, selects from the queue, sets ordering, assembles inputs into what the body will see (e.g., folds time steps into a batch).
+**Input controller** (timeless): decides readiness, selects from the queue, assembles inputs into what the body will see. `collect()` returns `Collected(data, mark)`:
 
-**Output controller** (timeless): decomposes the body's result back into output queues (splits a batch into steps), stamps labels and addresses.
+- `data` — the dict of named inputs passed to `execute(**data)`
+- `mark` — opaque metadata the input controller wants the output controller to receive (e.g., sequence index for reordering). Travels as a local variable through the tick; safe under concurrent execution.
 
-Input and output coordinate via a **receipt**: while passing packets to the body, the input returns "what to remember" (e.g., a sequence number); the executor carries it to the output and hands it in together with the body's result. The receipt travels with the task and survives network transit — unlike shared memory, it works in distributed mode.
+**Output controller** (timeless): receives the body's result and `mark` in `emit(results, mark)`. Stamps source labels and dispatches to target nodes.
 
 Examples of paired transforms:
 
-- **Synchronization.** Input records the sequence number; output reattaches it and holds results until they can be released in order. Restores ordering disrupted by uneven processing speed.
-- **Pack–unpack.** Input folds multiple packets into one batch; body processes the whole object; output splits the result back. One network pass per batch instead of N per item.
+- **Synchronization.** Input records the sequence index in `mark`; `OrderedInputController` holds out-of-order arrivals; `OrderedOutputController` uses `mark["idx"]` to hold results until they can be released in order.
+- **Pack–unpack.** Input folds multiple packets into one batch; body processes the whole object; output splits the result back.
 - **Normalize–denormalize.** Input scales/reshapes values to working form; body computes; output converts back.
 
-Ordinary nodes don't need custom controllers — defaults are provided: input is FIFO ("one packet per slot, ready when all slots are non-empty"); output stamps with the node's type label and dispatches along links.
+Ordinary nodes don't need custom controllers — defaults are provided: `InputController` (FIFO, ready when all slots are non-empty) and `OutputController` (stamps source label, dispatches along links).
 
 ## 7. Readiness and wakeup
 
 Data is received through the node, not directly into the queue. When a packet arrives, the input controller immediately signals whether a run is ready. The answer is one of three:
 
 ```
-READY           — run now
-WAIT            — not ready, wait for new data
-WAIT_UNTIL(T)   — not ready, but wake no later than T (batch deadline)
+Ready()          — run now
+Wait()           — not ready, wait for new data
+WaitUntil(T)     — not ready, but wake no later than T (batch deadline)
 ```
 
 Only the executor sleeps and wakes. It collects all deadlines T and sleeps until "a node completes or the nearest deadline T". The input controller has no thread or timer — it only names a deadline. This is how time-based batching works without a dedicated thread and without busy-waiting.
 
 ## 8. Body: sync, async, remote
 
-The body is `execute`. It can be:
+The body is `execute`. It may be:
 
-- **sync** — a plain function; the executor waits for it in place
-- **async** — a coroutine; long-running or remote work (redis, another node) is expressed via `await`, the executor sleeps and handles other nodes in the meantime
+- **sync** — a plain function; the executor waits for it
+- **async** — a coroutine; long-running or remote work is expressed via `await`
 
-The executor doesn't care whether the body computes locally or waits on the network: in async mode it called `execute` on all ready nodes and slept; the first completed coroutine woke it up. No separate resumption mechanism needed.
+`Node.run(ctrl)` is always an async coroutine. `SyncExecutor` wraps it in `asyncio.run()`; `AsyncExecutor` awaits it directly with a parallelism cap. The executor doesn't care whether the body computes locally or waits on the network.
+
+Source label, node memory, and executor control are available inside `execute` via context variables bound for the duration of each tick:
+
+```python
+self.memory       # per-node dict, persists across ticks
+self.stop()       # graceful stop: current ticks finish, no new ones start
+self.snapshot()   # executor state dict
+self.to(name, v)  # create a TaskResult for fan-out
+```
 
 ## 9. Task result
 
-The body returns a list of addressed results:
+`execute` returns one of:
 
-```
-TaskResult = (data, target node)
-```
+- `dict` — `{"link_name": value, ...}`; key `None` sends to graph output
+- `list[TaskResult]` — for fan-out or explicit source label override
+- `None` — no output (fire-and-forget)
 
-Typically one result and one target; a list is needed for branching and fan-out. The slot within the target is selected by type label (section 4). Graph output is handled by a terminal task, not a special result type.
+`TaskResult(value, target_node, label)` — explicit target node and optional label override. Created via `self.to(link_name, value, label=None)`.
 
 ## 10. Executor
 
 One loop, two modes:
 
 - delivers results of completed nodes to recipient queues (via their input controller), receives readiness responses
-- launches all READY nodes
+- launches all Ready nodes
 - sleeps until "a node completes or the nearest deadline T"
 - wakes up and repeats
 
-**SyncExecutor** waits for each body in place (ready nodes run sequentially). **AsyncExecutor** launches all ready bodies at once and sleeps on their completion, with a parallelism cap; long-running and remote bodies are transparent.
-
-The sleeper is always one — the executor — on `asyncio.wait` with timeout (async) or `time.sleep` (sync). No busy-waiting: with sub-second deadlines a spinlock would burn a CPU core and in async mode would starve waiting coroutines.
+**SyncExecutor** — `asyncio.run(node.run(ctrl))` per node; bodies run sequentially.
+**AsyncExecutor** — `await node.run(ctrl)` via `asyncio.ensure_future`; all ready bodies run concurrently, bounded by `max_parallel`.
 
 ## 11. Control through the graph
 
-Control code is a regular graph node. Through the context it accesses executor handles: stop (graceful: current runs finish, no new ones start) and a state snapshot for logging. Stopping a sibling branch, a watchdog, logging — all expressed as nodes, without external listeners.
+Control code is a regular graph node. `self.stop()` and `self.snapshot()` are available inside any `execute` body. Stopping a sibling branch, a watchdog, logging — all expressed as nodes, without external listeners.

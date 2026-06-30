@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Исполнение графов задач с двухуровневой моделью узла. Тело задачи — чистая функция одного такта; контроллеры ввода/вывода — скобка с состоянием вокруг него, которая отвечает за готовность, порядок и батчи между тактами.
+Исполнение графов задач с двухуровневой моделью узла. Тело задачи — чистая функция одного такта; контроллеры ввода/вывода — скобка с состоянием вокруг него, отвечающая за готовность, порядок и батчи между тактами.
 
 Полное описание модели — [SPEC.ru.md](SPEC.ru.md).
 
@@ -10,12 +10,12 @@
 
 ```
 actflow/
-  core.py       пакет данных, адресованный результат, исходы готовности
-  control.py    контроллеры ввода/вывода (стандартные реализации)
-  node.py       узел графа и контекст вызова тела
-  task.py       базовый класс задачи
+  core.py       Packet, Collected, TaskResult, исходы готовности, context vars
+  control.py    InputController, OutputController, OrderedInputController
+  node.py       Node, LinkRef — узел графа и async-исполнение
+  task.py       базовый класс Task
   tasks.py      готовые задачи: Input, Terminal, Tap
-  executor.py   синхронный и асинхронный исполнители, рычаги управления
+  executor.py   SyncExecutor, AsyncExecutor, Controller
 
 examples/
   01_montecarlo_lasvegas.py   гонка проверов, отмена соседа
@@ -26,50 +26,109 @@ examples/
 ## Запуск
 
 ```
-PYTHONPATH=. python examples/01_montecarlo_lasvegas.py
+cd actflow && pip install -e . && python examples/01_montecarlo_lasvegas.py
 ```
 
 ## API
 
-Задача считает и адресует результат по имени связи:
+### Тело задачи
+
+`execute` принимает именованные параметры (сопоставляются с входными слотами по ярлыку источника) и возвращает словарь маршрутизации или список `TaskResult`:
 
 ```python
 class Double(Task):
-    def execute(self, inputs, ctx):
-        x = next(iter(inputs.values()))
-        return [ctx.to("next", x * 2)]
+    def execute(self, value) -> dict:
+        return {"next": value * 2}
 ```
 
-Граф собирается из узлов с именованными связями (связь на себя — цикл):
+Ключ `None` отправляет значение на выход графа:
+
+```python
+class Terminal(Task):
+    def execute(self, value) -> dict:
+        return {None: value}
+```
+
+Async-тела прозрачны — исполнитель await-ит их автоматически:
+
+```python
+class Fetch(Task):
+    async def execute(self, url) -> dict:
+        data = await http_get(url)
+        return {"next": data}
+```
+
+### Сборка графа
+
+`task()` создаёт узел; `>>` соединяет узлы; `["name"]` выбирает именованный выходной сокет:
 
 ```python
 inp = Input()()
 dbl = Double()()
 end = Terminal()()
-inp.link("next", dbl)
-dbl.link("next", end)
+
+inp >> dbl >> end
 
 SyncExecutor().run(inp, 21)   # → [42]
 ```
 
-Тело может быть async — долгая или удалённая работа прозрачна:
+Именованные сокеты и петли:
 
 ```python
-class Remote(Task):
-    async def execute(self, inputs, ctx):
-        data = await redis_call(...)
-        return [ctx.to("next", data)]
+class Retry(Task):
+    def execute(self, item) -> dict:
+        if done(item):
+            return {"out": item}
+        return {"retry": item}
+
+node = Retry()()
+node["retry"] >> node   # петля на себя
+node["out"] >> sink
 ```
 
-Кастомное поведение приёма (батч, порядок) — подмена контроллера ввода:
+### Ярлык источника
+
+Ярлык источника штампуется на каждый исходящий пакет и направляет его в нужный входной слот получателя. Задаётся в `__init__`; по умолчанию — имя класса:
 
 ```python
-node.input = BatchInput(("batch",))
+w1 = Worker(label="w1")()
+w2 = Worker(label="w2")()
+
+class Collector(Task):
+    def execute(self, w1, w2) -> dict:   # имена слотов совпадают с ярлыками
+        ...
 ```
 
-Управление выражается узлами графа через `ctx.control`:
+Для простого графа (один узел на класс) ничего указывать не нужно — имена классов уникальны по умолчанию.
+
+### Состояние и управление
+
+Внутри `execute` доступны память узла и рычаги исполнителя через `self`:
 
 ```python
-Tap(lambda ctx, v: ctx.control.stop())
-Tap(lambda ctx, v: print(ctx.control.snapshot()))
+class Counter(Task):
+    def execute(self, value) -> dict:
+        self.memory["n"] = self.memory.get("n", 0) + 1
+        if self.memory["n"] >= 10:
+            self.stop()
+        return {"next": value}
 ```
+
+Fan-out на одну и ту же связь через `self.to()`:
+
+```python
+class Broadcast(Task):
+    async def execute(self, items) -> list:
+        return [self.to("out", item) for item in items]
+```
+
+### Кастомные контроллеры
+
+Передайте кастомный контроллер ввода в `__init__` для батчинга, упорядочения и т.д.:
+
+```python
+batcher = Batcher(input_controller=BatchInput(("batch",)))()
+collect = Collect(input_controller=OrderedInputController(("done",)))()
+```
+
+`OrderedInputController` встроен — доставляет пакеты в строгом порядке возрастания поля `idx` и передаёт `mark={"idx": n}` контроллеру вывода.
