@@ -3,7 +3,12 @@ from __future__ import annotations
 import functools
 import inspect
 
-from .control import InputController, OutputController
+from .control import (
+    InputController,
+    OutputController,
+    ExecutionControllerInterface,
+    LocalExecutionController,
+)
 from .core import TaskResult, _current_node, _current_ctrl
 from .node import Node
 
@@ -25,20 +30,34 @@ class Task:
     out_labels: tuple | None = None
     type_label: str = ""
 
-    def __init__(self, *, label: str = "", input_controller=None, output_controller=None):
+    def __init__(
+        self,
+        *,
+        label: str = "",
+        input_controller=None,
+        output_controller=None,
+        execution_controller: ExecutionControllerInterface | None = None,
+    ):
         self.label = label
         self._ic = input_controller
         self._oc = output_controller
+        self._ec = execution_controller
 
     def execute(self, *args, **kwargs):
         raise NotImplementedError
 
     def __call__(self) -> Node:
         labels = self.in_labels if self.in_labels is not None else _infer_in_labels(type(self))
-        source_label = self.type_label or (self.out_labels[0] if self.out_labels else None) or self.label or type(self).__name__
+        source_label = (
+            self.type_label
+            or (self.out_labels[0] if self.out_labels else None)
+            or self.label
+            or type(self).__name__
+        )
         ic = self._ic or InputController(labels)
         oc = self._oc or OutputController(source_label)
-        return Node(self, ic, oc, name=source_label)
+        ec = self._ec or LocalExecutionController()
+        return Node(self, ic, oc, ec, name=source_label)
 
     @property
     def memory(self) -> dict:

@@ -1,12 +1,43 @@
 from __future__ import annotations
 
+import inspect
 from collections import deque
 
 from .core import Collected, Ready, Wait
 
 
-class InputController:
-    """One FIFO queue per input slot. Routes packets by label; unknown → first free slot."""
+class ExecutionControllerInterface:
+    """Runs the task body. Subclass to redirect execution (e.g. to a remote worker)."""
+
+    async def run(self, task, data: dict):
+        raise NotImplementedError
+
+
+class LocalExecutionController(ExecutionControllerInterface):
+    """Default: runs task.execute(**data) in-process."""
+
+    async def run(self, task, data: dict):
+        results = task.execute(**data)
+        if inspect.iscoroutine(results):
+            results = await results
+        return results
+
+
+class InputControllerInterface:
+    """Interface for input controllers: readiness gating and slot collection."""
+
+    def offer(self, packet) -> Ready | Wait:
+        raise NotImplementedError
+
+    def poll(self) -> Ready | Wait:
+        raise NotImplementedError
+
+    def collect(self) -> Collected:
+        raise NotImplementedError
+
+
+class InputController(InputControllerInterface):
+    """FIFO: one queue per slot. Routes by label; unknown → first free slot."""
 
     def __init__(self, labels: tuple[str, ...]):
         self.labels = labels or ("in",)
@@ -68,8 +99,15 @@ class OrderedInputController(InputController):
         return Collected(data={self._slot: item}, mark={"idx": idx})
 
 
-class OutputController:
-    """Stamps outgoing packets with the node's source label."""
+class OutputControllerInterface:
+    """Interface for output controllers: label-stamping and result dispatch."""
+
+    def emit(self, results, mark: dict | None) -> list:
+        raise NotImplementedError
+
+
+class OutputController(OutputControllerInterface):
+    """Default: stamps source label onto outgoing packets."""
 
     def __init__(self, type_label: str):
         self.type_label = type_label

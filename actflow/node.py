@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import inspect
-
-from .control import InputController, OutputController
+from .control import (
+    InputControllerInterface,
+    OutputControllerInterface,
+    ExecutionControllerInterface,
+    LocalExecutionController,
+)
 from .core import _current_node, _current_ctrl
 
 
@@ -25,27 +28,26 @@ class Node:
     def __init__(
         self,
         task,
-        input_controller: InputController,
-        output_controller: OutputController,
+        input_controller: InputControllerInterface,
+        output_controller: OutputControllerInterface,
+        execution_controller: ExecutionControllerInterface | None = None,
         name: str = "",
     ):
         self.task = task
         self.name = name or type(task).__name__
         self.input_controller = input_controller
         self.output_controller = output_controller
+        self.execution_controller = execution_controller or LocalExecutionController()
         self.links: dict[str, Node] = {}
         self.memory: dict = {}
 
     async def run(self, ctrl) -> tuple:
-        """Collect inputs, run task body, return (results, mark)."""
+        """Collect inputs, run via execution_controller, return (results, mark)."""
         collected = self.input_controller.collect()
         tok_n = _current_node.set(self)
         tok_c = _current_ctrl.set(ctrl)
         try:
-            results = self.task.execute(**collected.data)
-            if inspect.iscoroutine(results):
-                results = await results
-
+            results = await self.execution_controller.run(self.task, collected.data)
             return results, collected.mark
         finally:
             _current_node.reset(tok_n)
