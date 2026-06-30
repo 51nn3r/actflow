@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from actflow import Task, Ready, Wait, WaitUntil, AsyncExecutor
+from actflow import Task, Ready, Wait, WaitUntil, AsyncExecutor, Collected
 from actflow.control import InputController
 
 
@@ -37,12 +37,12 @@ class BatchInput(InputController):
 
         return WaitUntil(deadline=self._first_at + BATCH_TIMEOUT)
 
-    def collect(self):
+    def collect(self) -> Collected:
         batch = [p.value for p in self.queues[self._slot]]
         self.queues[self._slot].clear()
         self._first_at = None
 
-        return {self._slot: batch}, len(batch)
+        return Collected(data={self._slot: batch})
 
 
 class FakeRedis:
@@ -59,38 +59,35 @@ class Producer(Task):
     """Emits one item at a time with a delay (simulating redis arrivals),
     routes the remainder back via 'loop' so the batch fills gradually."""
 
-    async def execute(self, inputs, ctx):
-        items = next(iter(inputs.values()))
+    async def execute(self, items: list) -> dict:
         if not items:
-            return []
+            return {}
 
         await asyncio.sleep(0.02)
         head, rest = items[0], items[1:]
-        results = [ctx.to("batch", head)]
+        result: dict = {"batch": head}
         if rest:
-            results.append(ctx.to("loop", rest))
+            result["loop"] = rest
 
-        return results
+        return result
 
 
 class Batcher(Task):
     """Receives a ready batch, sends it to redis, awaits the result."""
 
-    async def execute(self, inputs, ctx):
-        batch = next(iter(inputs.values()))
+    async def execute(self, batch: list) -> dict:
         size = len(batch)
         results = await FakeRedis.process(batch)
         print(f"   обработан батч из {size}: {batch} -> {results}")
 
-        return [ctx.out(results)]
+        return {None: results}
 
 
 def build():
     producer = Producer()()
-    batcher = Batcher()()
-    batcher.input = BatchInput(("batch",))
-    producer.link("batch", batcher)
-    producer.link("loop", producer)
+    batcher = Batcher(input_controller=BatchInput(("batch",)))()
+    producer["batch"] >> batcher
+    producer["loop"] >> producer
 
     return producer
 

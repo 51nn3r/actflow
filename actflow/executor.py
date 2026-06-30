@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 
-from .core import Packet, Ready, WaitUntil
-from .node import Ctx
+from .core import Packet, Ready, TaskResult, WaitUntil
 
 
 class Controller:
-    """Executor control handles exposed to nodes via ctx.control."""
+    """Executor control handle exposed to tasks via self.stop() / self.snapshot()."""
 
     def __init__(self, executor):
         self._executor = executor
@@ -27,14 +25,14 @@ class Controller:
 
 
 class _Base:
-    """Shared executor logic: deliver packets, track ready/waiting nodes, dispatch results."""
+    """Shared executor logic: packet delivery, readiness tracking, result dispatch."""
 
     def __init__(self):
         self.control = Controller(self)
         self.outputs: list = []
         self._ready: list = []
         self._ready_set: set = set()
-        self._waiting: dict = {}  # node → deadline (time-based batch)
+        self._waiting: dict = {}
         self._runs = 0
 
     def snapshot(self) -> dict:
@@ -42,7 +40,7 @@ class _Base:
                 "ready": len(self._ready), "waiting": len(self._waiting)}
 
     def _deliver(self, value, node, label):
-        self._handle(node, node.input.offer(Packet(value, label)))
+        self._handle(node, node.input_controller.offer(Packet(value, label)))
 
     def _handle(self, node, verdict):
         if isinstance(verdict, Ready):
@@ -58,46 +56,51 @@ class _Base:
     def _take_ready(self):
         node = self._ready.pop(0)
         self._ready_set.discard(node)
-
         return node
 
     def _repoll_due(self):
-        # re-poll nodes past their deadline; batch controller will yield a partial batch
         now = time.monotonic()
         for node, dl in list(self._waiting.items()):
             if dl <= now:
                 self._waiting.pop(node, None)
-                self._handle(node, node.input.poll())
+                self._handle(node, node.input_controller.poll())
 
     def _next_deadline(self):
         return min(self._waiting.values()) if self._waiting else None
 
-    def _collect_results(self, node, receipt, results):
-        for value, target, label in node.output.emit(results, receipt):
+    def _collect_results(self, node, results, mark):
+        if results is None:
+            return
+
+        if isinstance(results, dict):
+            type_label = node.output_controller.type_label
+            for link_name, value in results.items():
+                if link_name is None:
+                    self.outputs.append(value)
+                else:
+                    self._deliver(value, node.links[link_name], type_label)
+
+            return
+
+        if isinstance(results, TaskResult):
+            results = [results]
+
+        for value, target, label in node.output_controller.emit(results, mark):
             if target is None:
                 self.outputs.append(value)
                 continue
 
             self._deliver(value, target, label)
 
+    def _after_run(self, node):
+        self._handle(node, node.input_controller.poll())
+
     def _seed(self, start, value, label="seed"):
         self._deliver(value, start, label)
 
-    def _start(self, node):
-        inputs, receipt = node.input.collect()
-        self._runs += 1
-        ctx = Ctx(node, self.control)
-        results = node.task.execute(inputs, ctx)
-
-        return results, receipt
-
-    def _after_run(self, node):
-        # node may still be ready if queues have remaining items
-        self._handle(node, node.input.poll())
-
 
 class SyncExecutor(_Base):
-    """Runs ready nodes sequentially; each body is awaited in place."""
+    """Runs ready nodes sequentially."""
 
     def run(self, start, value=None):
         self._seed(start, value)
@@ -112,18 +115,16 @@ class SyncExecutor(_Base):
                 continue
 
             node = self._take_ready()
-            results, receipt = self._start(node)
-            if inspect.iscoroutine(results):
-                results = asyncio.run(results)
-
-            self._collect_results(node, receipt, results or [])
+            results, mark = asyncio.run(node.run(self.control))
+            self._runs += 1
+            self._collect_results(node, results, mark)
             self._after_run(node)
 
         return self.outputs
 
 
 class AsyncExecutor(_Base):
-    """Launches all ready bodies concurrently; sleeps until completion or next deadline."""
+    """Launches all ready bodies concurrently."""
 
     def __init__(self, max_parallel: int = 8):
         super().__init__()
@@ -151,9 +152,10 @@ class AsyncExecutor(_Base):
                 running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
-                node, receipt, results = task.result()
-                if results is not None:
-                    self._collect_results(node, receipt, results)
+                node, results, mark = task.result()
+                if node is not None:
+                    self._runs += 1
+                    self._collect_results(node, results, mark)
                     self._after_run(node)
 
             self._repoll_due()
@@ -163,13 +165,10 @@ class AsyncExecutor(_Base):
     async def _run_node(self, node):
         async with self._sem:
             if self.control.stopped:
-                return node, None, None
+                return None, None, None
 
-            results, receipt = self._start(node)
-            if inspect.iscoroutine(results):
-                results = await results
-
-            return node, receipt, results or []
+            results, mark = await node.run(self.control)
+            return node, results, mark
 
     def _sleep_timeout(self):
         deadline = self._next_deadline()

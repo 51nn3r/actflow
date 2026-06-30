@@ -1,9 +1,7 @@
 import asyncio
 import random
 
-from actflow import Task, AsyncExecutor
-from actflow.control import InputController, OutputController
-from actflow.core import Ready, Wait
+from actflow import Task, TaskResult, AsyncExecutor, OrderedInputController
 
 
 LAYERS = 3  # network depth
@@ -13,21 +11,18 @@ SAMPLES = 6  # samples in the stream
 class Feed(Task):
     """Feeds samples into the network tagged with a sequence index for the synchronizer."""
 
-    async def execute(self, inputs, ctx):
-        items = next(iter(inputs.values()))
-        out = []
-        for idx, x in enumerate(items):
-            out.append(ctx.to("layer", {"idx": idx, "value": x, "layer": 0}))
-
-        return out
+    async def execute(self, items) -> list[TaskResult]:
+        return [
+            self.to("layer", {"idx": idx, "value": x, "layer": 0})
+            for idx, x in enumerate(items)
+        ]
 
 
 class Layer(Task):
     """Computes one layer with variable delay (distributed worker).
     Routes to itself for the next layer, or to the synchronizer when done."""
 
-    async def execute(self, inputs, ctx):
-        item = next(iter(inputs.values()))
+    async def execute(self, item) -> dict:
         await asyncio.sleep(random.uniform(0.01, 0.05))
 
         item = dict(item)
@@ -35,68 +30,26 @@ class Layer(Task):
         item["layer"] += 1
 
         if item["layer"] < LAYERS:
-            return [ctx.to("layer", item)]
+            return {"layer": item}
 
-        return [ctx.to("done", item)]
-
-
-class OrderedInput(InputController):
-    """Synchronizer input: passes results in strict ascending idx order.
-    Holds out-of-order arrivals; the consumed idx travels to the output as a receipt."""
-
-    def __init__(self, labels):
-        super().__init__(labels)
-        self._slot = self.labels[0]
-        self._next = 0
-        self._held: dict = {}
-
-    def offer(self, packet):
-        item = packet.value
-        self._held[item["idx"]] = item
-
-        return self.poll()
-
-    def poll(self):
-        return Ready() if self._next in self._held else Wait()
-
-    def collect(self):
-        item = self._held.pop(self._next)
-        idx = self._next
-        self._next += 1
-
-        return {self._slot: item}, idx  # receipt = sequence index
-
-
-class OrderedOutput(OutputController):
-    """Synchronizer output: attaches the idx from the receipt back to the result."""
-
-    def emit(self, results, receipt):
-        out = []
-        for r in results:
-            out.append((r.value, r.node, self.type_label))
-
-        return out
+        return {"done": item}
 
 
 class Collect(Task):
     """Synchronizer terminal: emits values as graph output in original order."""
 
-    def execute(self, inputs, ctx):
-        item = next(iter(inputs.values()))
-
-        return [ctx.out((item["idx"], item["value"]))]
+    def execute(self, done) -> dict:
+        return {None: (done["idx"], done["value"])}
 
 
 def build():
     feed = Feed()()
     layer = Layer()()
-    collect = Collect()()
-    collect.input = OrderedInput(("done",))
-    collect.output = OrderedOutput("Collect")
+    collect = Collect(input_controller=OrderedInputController(("done",)))()
 
-    feed.link("layer", layer)
-    layer.link("layer", layer)  # same node processes every layer in sequence
-    layer.link("done", collect)
+    feed["layer"] >> layer
+    layer["layer"] >> layer  # same node processes every layer in sequence
+    layer["done"] >> collect
 
     return feed
 

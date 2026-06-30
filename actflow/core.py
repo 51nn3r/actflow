@@ -1,30 +1,33 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
+
+
+_current_node: ContextVar = ContextVar("_current_node", default=None)
+_current_ctrl: ContextVar = ContextVar("_current_ctrl", default=None)
 
 
 @dataclass(frozen=True)
 class Packet:
-    """Immutable value envelope; routable to multiple nodes without copying.
-
-    value — payload the body works with;
-    label — destination slot in the receiving node."""
-
     value: Any
     label: str
 
-    def relabel(self, label: str) -> "Packet":
-        return replace(self, label=label)
+
+@dataclass(frozen=True)
+class Collected:
+    """Result of collect(): dequeued inputs + optional mark for OutputController."""
+
+    data: dict
+    mark: dict | None = None
 
 
 @dataclass(frozen=True)
 class TaskResult:
-    """Addressed result: data plus the target node and slot."""
-
     value: Any
     node: "Node"
-    label: str | None = None  # None — use the source node's type label
+    label: str | None = None
 
 
 class Verdict:
@@ -33,16 +36,14 @@ class Verdict:
 
 @dataclass(frozen=True)
 class Ready(Verdict):
-    """Node is ready to run."""
+    pass
 
 
 @dataclass(frozen=True)
 class Wait(Verdict):
-    """Not ready; wait for new incoming data."""
+    pass
 
 
 @dataclass(frozen=True)
 class WaitUntil(Verdict):
-    """Not ready, but wake no later than this deadline (batch timeout)."""
-
     deadline: float

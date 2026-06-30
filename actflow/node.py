@@ -1,52 +1,65 @@
 from __future__ import annotations
 
-from .core import TaskResult
+import inspect
+
 from .control import InputController, OutputController
+from .core import _current_node, _current_ctrl
+
+
+class LinkRef:
+    """Named output socket; used to wire graph edges via >>."""
+
+    def __init__(self, node: Node, name: str):
+        self.node = node
+        self.name = name
+
+    def __rshift__(self, target: Node | LinkRef) -> Node:
+        target_node = target.node if isinstance(target, LinkRef) else target
+        self.node.links[self.name] = target_node
+        return target_node
 
 
 class Node:
-    """Task's slot in the graph: controllers, body, and named outgoing links.
-    Links are named so the task body stays reusable and holds no node references."""
+    """Task's slot in the graph: controllers, links, per-node memory, and execution."""
 
-    def __init__(self, task, labels, type_label, name=""):
+    def __init__(
+        self,
+        task,
+        input_controller: InputController,
+        output_controller: OutputController,
+        name: str = "",
+    ):
         self.task = task
         self.name = name or type(task).__name__
-        self.input = InputController(tuple(labels))
-        self.output = OutputController(type_label)
-        self.links: dict[str, "Node"] = {}
+        self.input_controller = input_controller
+        self.output_controller = output_controller
+        self.links: dict[str, Node] = {}
+        self.memory: dict = {}
 
-    def link(self, name, target) -> "Node":
+    async def run(self, ctrl) -> tuple:
+        """Collect inputs, run task body, return (results, mark)."""
+        collected = self.input_controller.collect()
+        tok_n = _current_node.set(self)
+        tok_c = _current_ctrl.set(ctrl)
+        try:
+            results = self.task.execute(**collected.data)
+            if inspect.iscoroutine(results):
+                results = await results
+
+            return results, collected.mark
+        finally:
+            _current_node.reset(tok_n)
+            _current_ctrl.reset(tok_c)
+
+    def link(self, name: str, target: Node) -> Node:
         self.links[name] = target
-
         return self
 
-    def __repr__(self):
+    def __rshift__(self, target: Node | LinkRef) -> Node:
+        return self["next"].__rshift__(target)
+
+    def __getitem__(self, name: str) -> LinkRef:
+        return LinkRef(self, name)
+
+    def __repr__(self) -> str:
         return f"<Node {self.name}>"
-
-
-class Ctx:
-    """Execution context passed to the task body for one tick.
-
-    link(name)      — target node by link name
-    to(name, value) — addressed result routed through that link
-    out(value)      — emit value as a graph output
-    memory          — node-local state persisted between ticks
-    control         — executor control handles"""
-
-    def __init__(self, node, control):
-        self._node = node
-        self.control = control
-
-    @property
-    def memory(self) -> dict:
-        return self._node.__dict__.setdefault("_memory", {})
-
-    def link(self, name) -> Node:
-        return self._node.links[name]
-
-    def to(self, name, value, label=None) -> TaskResult:
-        return TaskResult(value, self._node.links[name], label)
-
-    def out(self, value) -> TaskResult:
-        # target None signals the executor to collect value as graph output
-        return TaskResult(value, None, None)

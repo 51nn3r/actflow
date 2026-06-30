@@ -1,35 +1,37 @@
 from __future__ import annotations
 
+from .core import TaskResult
 from .task import Task
 
 
 class Input(Task):
     """Graph entry point: forwards the received value through the 'next' link."""
 
-    def execute(self, inputs, ctx):
-        value = next(iter(inputs.values()))
+    in_labels = ("value",)
 
-        return [ctx.to("next", value)]
+    def execute(self, value) -> dict:
+        return {"next": value}
 
 
 class Terminal(Task):
-    """Emits the received value as a graph output."""
+    """Collects the received value as a graph output."""
 
-    def execute(self, inputs, ctx):
-        value = next(iter(inputs.values()))
+    in_labels = ("value",)
 
-        return [ctx.out(value)]
+    def execute(self, value) -> list[TaskResult]:
+        return [TaskResult(value, None, None)]
 
 
 class Tap(Task):
     """Runs a side-effect action then forwards the value through the 'next' link.
-    action(ctx, value) — may call ctx.control to steer the executor."""
+    action(task, value) — may call task.stop() to steer the executor."""
 
-    def __init__(self, action):
+    in_labels = ("value",)
+
+    def __init__(self, action, **kwargs):
+        super().__init__(**kwargs)
         self.action = action
 
-    def execute(self, inputs, ctx):
-        value = next(iter(inputs.values()))
-        self.action(ctx, value)
-
-        return [ctx.to("next", value)]
+    def execute(self, value) -> dict:
+        self.action(self, value)
+        return {"next": value}
