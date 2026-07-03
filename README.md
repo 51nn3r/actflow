@@ -15,12 +15,13 @@ actflow/
   node.py       Node, LinkRef — graph slot and async execution
   task.py       Task base class
   tasks.py      built-in tasks: Input, Terminal, Tap
-  executor.py   SyncExecutor, AsyncExecutor, Controller
+  executor.py   SyncExecutor, AsyncExecutor, ExecutorHandle
 
 examples/
   01_montecarlo_lasvegas.py   prover race, sibling cancellation
   02_redis_batcher.py         size-and-timeout batching, async body
   03_distributed_layers.py    distributed NN layers, order synchronizer
+  04_naming_variants.py       naming spectrum: input_map, output_map, slot_map
 ```
 
 ## Run
@@ -101,6 +102,20 @@ class Collector(Task):
 
 For a simple graph (one node per class) no label config is needed — class names are unique by default.
 
+### Naming controls
+
+Slots are inferred from `execute`'s parameters; override or extend the naming when needed:
+
+```python
+Merge(in_labels=("left", "right"))  # declare slots (a **kwargs body can't infer them)
+Two(input_map={"A": "a", "B": "b"})  # hop 1: edge label -> task slot
+Split(output_map={"hi": "H", "lo": "L"})  # per-link outgoing label
+Two(input_map={"A": "a"}, on_dropped=log)  # hook for an unmapped label
+InputController(("a", "b"), slot_map={"a": "q1", "b": "q2"})  # hop 2: slot -> queue
+```
+
+See `examples/04_naming_variants.py` for the full spectrum.
+
 ### Task state and control
 
 Inside `execute`, access node memory and executor control via `self`:
@@ -127,7 +142,7 @@ class Broadcast(Task):
 Pass a custom input controller in `__init__` for batching, ordering, etc.:
 
 ```python
-batcher = Batcher(input_controller=BatchInput(("batch",)))()
+batcher = Batcher(input_controller=BatchInputController(("batch",)))()
 collect = Collect(input_controller=OrderedInputController(("done",)))()
 ```
 

@@ -15,12 +15,13 @@ actflow/
   node.py       Node, LinkRef — узел графа и async-исполнение
   task.py       базовый класс Task
   tasks.py      готовые задачи: Input, Terminal, Tap
-  executor.py   SyncExecutor, AsyncExecutor, Controller
+  executor.py   SyncExecutor, AsyncExecutor, ExecutorHandle
 
 examples/
   01_montecarlo_lasvegas.py   гонка проверов, отмена соседа
   02_redis_batcher.py         батч по размеру и таймауту, async-тело
   03_distributed_layers.py    распределённые слои НС, синхронизатор порядка
+  04_naming_variants.py       спектр именования: input_map, output_map, slot_map
 ```
 
 ## Запуск
@@ -101,6 +102,20 @@ class Collector(Task):
 
 Для простого графа (один узел на класс) ничего указывать не нужно — имена классов уникальны по умолчанию.
 
+### Управление именами
+
+Слоты выводятся из параметров `execute`; при необходимости имена переопределяются или расширяются:
+
+```python
+Merge(in_labels=("left", "right"))  # объявить слоты (у **kwargs-тела их не вывести)
+Two(input_map={"A": "a", "B": "b"})  # прыжок 1: ярлык ребра -> слот задачи
+Split(output_map={"hi": "H", "lo": "L"})  # пер-линковый исходящий ярлык
+Two(input_map={"A": "a"}, on_dropped=log)  # хук на неучтённый ярлык
+InputController(("a", "b"), slot_map={"a": "q1", "b": "q2"})  # прыжок 2: слот -> очередь
+```
+
+Полный спектр — `examples/04_naming_variants.py`.
+
 ### Состояние и управление
 
 Внутри `execute` доступны память узла и рычаги исполнителя через `self`:
@@ -127,7 +142,7 @@ class Broadcast(Task):
 Передайте кастомный контроллер ввода в `__init__` для батчинга, упорядочения и т.д.:
 
 ```python
-batcher = Batcher(input_controller=BatchInput(("batch",)))()
+batcher = Batcher(input_controller=BatchInputController(("batch",)))()
 collect = Collect(input_controller=OrderedInputController(("done",)))()
 ```
 

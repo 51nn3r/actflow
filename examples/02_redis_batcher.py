@@ -9,7 +9,7 @@ BATCH_SIZE = 4
 BATCH_TIMEOUT = 0.3  # max wait for a full batch, seconds
 
 
-class BatchInput(InputController):
+class BatchInputController(InputController):
     """Batching input controller: accumulates packets until size or timeout.
     poll signals readiness or the next deadline; collect returns the full batch."""
 
@@ -85,7 +85,7 @@ class Batcher(Task):
 
 def build():
     producer = Producer()()
-    batcher = Batcher(input_controller=BatchInput(("batch",)))()
+    batcher = Batcher(input_controller=BatchInputController(("batch",)))()
     producer["batch"] >> batcher
     producer["loop"] >> producer
 

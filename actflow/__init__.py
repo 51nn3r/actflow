@@ -11,7 +11,7 @@ from .control import (
     OrderedInputController,
 )
 from .tasks import Input, Terminal, Tap
-from .executor import SyncExecutor, AsyncExecutor, Controller
+from .executor import SyncExecutor, AsyncExecutor, ExecutorHandle
 
 __all__ = [
     "Task",
@@ -35,5 +35,5 @@ __all__ = [
     "Tap",
     "SyncExecutor",
     "AsyncExecutor",
-    "Controller",
+    "ExecutorHandle",
 ]

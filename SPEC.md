@@ -36,7 +36,7 @@ The destination slot is determined by the **source label**, not by the order of 
 
 By default, a node stamps its result with its own source label: a node whose task has `label="A"` produces data labeled `A`. A receiving node with `execute(self, A, C)` routes incoming `A` to the `A` slot and `C` to the `C` slot.
 
-**Label resolution** (first non-empty wins): `type_label` class var → `out_labels[0]` class var → `label` constructor arg → class name. For a simple graph with one node per class, the class name is unique and no explicit label config is needed.
+**Label resolution** (first non-empty wins): `out_labels[0]` class var → `label` constructor arg → class name. For a simple graph with one node per class, the class name is unique and no explicit label config is needed.
 
 If two nodes of the same class send to the same collector, name them:
 
@@ -48,7 +48,16 @@ class Collector(Task):
     def execute(self, w1, w2) -> dict: ...
 ```
 
-Unknown incoming label → auto-bound to the first free slot. Known label → its queue directly.
+By default, an unknown incoming label is bound to the first free slot (and remembered, so the same label always lands there); a known label goes straight to its queue.
+
+**Slot inference.** Slots come from the `execute` parameter names (minus `self`/`ctx`), or from `in_labels`. A variadic body (`*args`/`**kwargs`) has no fixed arity — slots can't be inferred, and building the node fails loud with a `TypeError` unless `in_labels` is set.
+
+**Name translation.** Three namespaces meet at a node: the **edge label** (on the wire), the **task slot** (`execute`'s parameter), and the **controller queue** (the controller's internal name). By default all three coincide, so nothing needs configuring. When they differ, two independent hops bridge them:
+
+- **Hop 1, on the node** — `input_map` (edge → slot) renames an incoming label to a task slot. Without a map, the label falls through to the default routing above; with a map, a label absent from it is dropped and passed to `on_dropped(packet)` (a no-op by default). Map targets are validated against the task's slots at build time.
+- **Hop 2, in the controller** — `slot_map` (slot → queue); see section 6.
+
+On the output side, `output_map` (link name → edge label) sets a per-link outgoing label (default: the node's source label). One node can thus send distinct labels down different links to the same receiver, which the receiver's `input_map` then splits into separate slots.
 
 ## 5. Input queues and candidate selection
 
@@ -56,7 +65,7 @@ Each node input is a named slot with a FIFO queue. When multiple packets arrive 
 
 ## 6. Paired controllers — an invertible bracket around the body
 
-The input and output controllers act as an invertible pair. The input applies a transformation; the output applies the inverse. The body in between doesn't know it's been wrapped.
+The input and output controllers act as an invertible pair. The input applies a transformation; the output applies the inverse. The body in between doesn't know it's been wrapped. The node is the facade over both: the executor talks to the node (`offer` / `poll` / `collect` / `dispatch`), never to the controllers directly.
 
 ```
 collect → body: execute → emit
@@ -67,15 +76,17 @@ collect → body: execute → emit
 - `data` — the dict of named inputs passed to `execute(**data)`
 - `mark` — opaque metadata the input controller wants the output controller to receive (e.g., sequence index for reordering). Travels as a local variable through the tick; safe under concurrent execution.
 
-**Output controller** (timeless): receives the body's result and `mark` in `emit(results, mark)`. Stamps source labels and dispatches to target nodes.
+**Output controller** (timeless): receives the body's result and `mark` in `emit(results, mark)` and turns it into `(value, target, label)` triples. Source-label stamping is the **node's** job — it applies the default label and `output_map`; the default `OutputController` just passes results through.
+
+**Hop 2 — controller queues** (`slot_map`, slot → queue): a controller carries its own internal queue names, so one controller can be reused across tasks with different slot names. `slot_map` renames task slots to the controller's queues 1-to-1 (default: identity); `collect()` maps them back, so the body still sees its own slot names.
 
 Examples of paired transforms:
 
-- **Synchronization.** Input records the sequence index in `mark`; `OrderedInputController` holds out-of-order arrivals; `OrderedOutputController` uses `mark["idx"]` to hold results until they can be released in order.
+- **Synchronization.** `OrderedInputController` holds out-of-order arrivals and releases them in strict `idx` order, passing `mark={"idx": n}` to the output side (example 03).
 - **Pack–unpack.** Input folds multiple packets into one batch; body processes the whole object; output splits the result back.
 - **Normalize–denormalize.** Input scales/reshapes values to working form; body computes; output converts back.
 
-Ordinary nodes don't need custom controllers — defaults are provided: `InputController` (FIFO, ready when all slots are non-empty) and `OutputController` (stamps source label, dispatches along links).
+Ordinary nodes don't need custom controllers — defaults are provided: `InputController` (FIFO, ready when all slots are non-empty) and `OutputController` (pass-through; the node stamps the source label).
 
 ## 7. Readiness and wakeup
 
@@ -96,9 +107,9 @@ The body is `execute`. It may be:
 - **sync** — a plain function; the executor waits for it
 - **async** — a coroutine; long-running or remote work is expressed via `await`
 
-`Node.run(ctrl)` is always an async coroutine. `SyncExecutor` wraps it in `asyncio.run()`; `AsyncExecutor` awaits it directly with a parallelism cap. The executor doesn't care whether the body computes locally or waits on the network.
+`Node.run(handle)` is always an async coroutine. `SyncExecutor` wraps it in `asyncio.run()`; `AsyncExecutor` awaits it directly with a parallelism cap. The executor doesn't care whether the body computes locally or waits on the network.
 
-Source label, node memory, and executor control are available inside `execute` via context variables bound for the duration of each tick:
+Node memory and executor control are available inside `execute` via context variables bound for the duration of each tick:
 
 ```python
 self.memory       # per-node dict, persists across ticks
@@ -126,8 +137,10 @@ One loop, two modes:
 - sleeps until "a node completes or the nearest deadline T"
 - wakes up and repeats
 
-**SyncExecutor** — `asyncio.run(node.run(ctrl))` per node; bodies run sequentially.
-**AsyncExecutor** — `await node.run(ctrl)` via `asyncio.ensure_future`; all ready bodies run concurrently, bounded by `max_parallel`.
+**SyncExecutor** — `asyncio.run(node.run(handle))` per node; bodies run sequentially.
+**AsyncExecutor** — `await node.run(handle)` via `asyncio.ensure_future`; all ready bodies run concurrently, bounded by `max_parallel`.
+
+Ready nodes are held in an insertion-ordered set (`ReadyQueue`); deadline-parked nodes in a `WaitSet`. The task-facing control handle is `ExecutorHandle` (`self.stop()` / `self.snapshot()`).
 
 ## 11. Control through the graph
 
