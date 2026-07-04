@@ -176,32 +176,39 @@ class AsyncExecutor(_Base):
         """Drive the graph, running ready bodies concurrently up to max_parallel."""
         self._seed(start, value)
         running: set = set()
-        while True:
-            while self._ready and not self.handle.stopped:
-                node = self._take_ready()
-                running.add(asyncio.ensure_future(self._run_node(node)))
+        try:
+            while True:
+                while self._ready and not self.handle.stopped:
+                    node = self._take_ready()
+                    running.add(asyncio.ensure_future(self._run_node(node)))
 
-            if not running:
-                deadline = self._next_deadline()
-                if deadline is None or self.handle.stopped:
-                    break
+                if not running:
+                    deadline = self._next_deadline()
+                    if deadline is None or self.handle.stopped:
+                        break
 
-                await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+                    await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+                    self._repoll_due()
+                    continue
+
+                timeout = self._sleep_timeout()
+                done, running = await asyncio.wait(
+                    running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    node, results, mark = task.result()
+                    if node is not None:
+                        self._runs += 1
+                        self._collect_results(node, results, mark)
+                        self._after_run(node)
+
                 self._repoll_due()
-                continue
+        finally:
+            for task in running:
+                task.cancel()
 
-            timeout = self._sleep_timeout()
-            done, running = await asyncio.wait(
-                running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in done:
-                node, results, mark = task.result()
-                if node is not None:
-                    self._runs += 1
-                    self._collect_results(node, results, mark)
-                    self._after_run(node)
-
-            self._repoll_due()
+            if running:
+                await asyncio.gather(*running, return_exceptions=True)
 
         return self.outputs
 
