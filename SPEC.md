@@ -65,7 +65,7 @@ Each node input is a named slot with a FIFO queue. When multiple packets arrive 
 
 ## 6. Paired controllers — an invertible bracket around the body
 
-The input and output controllers act as an invertible pair. The input applies a transformation; the output applies the inverse. The body in between doesn't know it's been wrapped. The node is the facade over both: the executor talks to the node (`offer` / `poll` / `collect` / `dispatch`), never to the controllers directly.
+The input and output controllers act as an invertible pair. The input applies a transformation; the output applies the inverse. The body in between doesn't know it's been wrapped. The node is the facade over both: the executor talks to the node (`offer` / `poll` / `run`), never to the controllers directly. `run` drives the whole tick internally — `collect` → `execute` → `dispatch` → `emit` — and hands the executor a ready list of addressed results.
 
 ```
 collect → body: execute → emit
@@ -76,7 +76,7 @@ collect → body: execute → emit
 - `data` — the dict of named inputs passed to `execute(**data)`
 - `mark` — opaque metadata the input controller wants the output controller to receive (e.g., sequence index for reordering). Travels as a local variable through the tick; safe under concurrent execution.
 
-**Output controller** (timeless): receives the body's result and `mark` in `emit(results, mark)` and turns it into `(value, target, label)` triples. Source-label stamping is the **node's** job — it applies the default label and `output_map`; the default `OutputController` just passes results through.
+**Output controller** (timeless): receives the body's result and `mark` in `emit(results, mark)` and turns it into a `list[TaskResult]` (value, target, label). Source-label stamping is the **node's** job — it applies the default label and `output_map`; the default `OutputController` just passes results through.
 
 **Hop 2 — controller queues** (`slot_map`, slot → queue): a controller carries its own internal queue names, so one controller can be reused across tasks with different slot names. `slot_map` renames task slots to the controller's queues 1-to-1 (default: identity); `collect()` maps them back, so the body still sees its own slot names.
 

@@ -72,20 +72,20 @@ class Node:
         """Pull the inputs the body will receive this tick."""
         return self.input_controller.collect()
 
-    async def run(self, handle: ExecutorHandle) -> tuple:
-        """Collect inputs, run via execution_controller, return (results, mark)."""
+    async def run(self, handle: ExecutorHandle) -> list[TaskResult]:
+        """Collect inputs, execute, route through output_controller; return addressed results."""
         collected = self.collect()
         tok_node = _current_node.set(self)
         tok_handle = _current_handle.set(handle)
         try:
             results = await self.execution_controller.run(self.task, collected.data)
-            return results, collected.mark
+            return self.dispatch(results, collected.mark)
         finally:
             _current_node.reset(tok_node)
             _current_handle.reset(tok_handle)
 
-    def dispatch(self, results: Any, mark: dict | None) -> list:
-        """Translate raw body results into (value, target, label) triples.
+    def dispatch(self, results: Any, mark: dict | None) -> list[TaskResult]:
+        """Route raw body results into addressed TaskResults.
 
         Owns the default source label; a None target routes to the graph output."""
         if results is None:
@@ -94,20 +94,21 @@ class Node:
         if isinstance(results, dict):
             output_map = self.task.output_map or {}
             return [
-                (value,
-                 None if link_name is None else self.links[link_name],
-                 output_map.get(link_name, self.source_label))
+                TaskResult(
+                    value,
+                    None if link_name is None else self.links[link_name],
+                    output_map.get(link_name, self.source_label),
+                )
                 for link_name, value in results.items()
             ]
 
         if isinstance(results, TaskResult):
             results = [results]
 
-        out = []
-        for value, target, label in self.output_controller.emit(results, mark):
-            out.append((value, target, label if label is not None else self.source_label))
-
-        return out
+        return [
+            TaskResult(result.value, result.node, result.label if result.label is not None else self.source_label)
+            for result in self.output_controller.emit(results, mark)
+        ]
 
     def link(self, name: str, target: Node) -> Node:
         """Wire the named output socket to target; returns self for chaining."""

@@ -4,7 +4,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
-from .core import Packet, Ready, Verdict, WaitUntil
+from .core import Packet, Ready, TaskResult, Verdict, WaitUntil
 
 if TYPE_CHECKING:
     from .node import Node
@@ -98,9 +98,9 @@ class _Base:
         return {"runs": self._runs, "outputs": len(self.outputs),
                 "ready": len(self._ready), "waiting": len(self._waiting)}
 
-    def _deliver(self, value: Any, node: Node, label: str) -> None:
-        """Offer a packet to a node and record its readiness verdict."""
-        self._handle(node, node.offer(Packet(value, label)))
+    def _deliver(self, result: TaskResult) -> None:
+        """Offer a packet to its target node and record the readiness verdict."""
+        self._handle(result.node, result.node.offer(Packet(result.value, result.label)))
 
     def _handle(self, node: Node, verdict: Verdict) -> None:
         """Move the node between the ready queue and the waiting set per verdict."""
@@ -123,13 +123,13 @@ class _Base:
         """Earliest pending deadline, or None if nothing is waiting."""
         return self._waiting.next_deadline()
 
-    def _collect_results(self, node: Node, results: Any, mark: dict | None) -> None:
-        """Deliver a finished node's results to its links or the graph output."""
-        for value, target, label in node.dispatch(results, mark):
-            if target is None:
-                self.outputs.append(value)
+    def _collect_results(self, results: list[TaskResult]) -> None:
+        """Deliver a finished node's addressed results to their targets or the graph output."""
+        for result in results:
+            if result.node is None:
+                self.outputs.append(result.value)
             else:
-                self._deliver(value, target, label)
+                self._deliver(result)
 
     def _after_run(self, node: Node) -> None:
         """Re-check a node's readiness after it ran (leftover queued inputs)."""
@@ -137,7 +137,7 @@ class _Base:
 
     def _seed(self, start: Node, value: Any, label: str = "seed") -> None:
         """Inject the initial packet that kicks off the run."""
-        self._deliver(value, start, label)
+        self._deliver(TaskResult(value, start, label))
 
 
 class SyncExecutor(_Base):
@@ -157,9 +157,9 @@ class SyncExecutor(_Base):
                 continue
 
             node = self._take_ready()
-            results, mark = asyncio.run(node.run(self.handle))
+            results = asyncio.run(node.run(self.handle))
             self._runs += 1
-            self._collect_results(node, results, mark)
+            self._collect_results(results)
             self._after_run(node)
 
         return self.outputs
@@ -176,11 +176,14 @@ class AsyncExecutor(_Base):
         """Drive the graph, running ready bodies concurrently up to max_parallel."""
         self._seed(start, value)
         running: set = set()
+        node_of: dict = {}
         try:
             while True:
                 while self._ready and not self.handle.stopped:
                     node = self._take_ready()
-                    running.add(asyncio.ensure_future(self._run_node(node)))
+                    future = asyncio.ensure_future(self._run_node(node))
+                    node_of[future] = node
+                    running.add(future)
 
                 if not running:
                     deadline = self._next_deadline()
@@ -196,10 +199,11 @@ class AsyncExecutor(_Base):
                     running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in done:
-                    node, results, mark = task.result()
-                    if node is not None:
+                    node = node_of.pop(task)
+                    results = task.result()
+                    if results is not None:
                         self._runs += 1
-                        self._collect_results(node, results, mark)
+                        self._collect_results(results)
                         self._after_run(node)
 
                 self._repoll_due()
@@ -212,14 +216,13 @@ class AsyncExecutor(_Base):
 
         return self.outputs
 
-    async def _run_node(self, node: Node) -> tuple:
-        """Run one node under the parallelism semaphore; returns (node, results, mark)."""
+    async def _run_node(self, node: Node) -> list[TaskResult] | None:
+        """Run one node under the parallelism semaphore; None if skipped after a stop."""
         async with self._sem:
             if self.handle.stopped:
-                return None, None, None
+                return None
 
-            results, mark = await node.run(self.handle)
-            return node, results, mark
+            return await node.run(self.handle)
 
     def _sleep_timeout(self) -> float | None:
         """How long to wait for a completion before re-polling deadlines."""

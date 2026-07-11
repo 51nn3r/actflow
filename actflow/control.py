@@ -131,14 +131,14 @@ class OrderedInputController(InputController):
 class OutputControllerInterface:
     """Interface for output controllers: label-stamping and result dispatch."""
 
-    def emit(self, results: list[TaskResult], mark: dict | None) -> list:
-        """Turn body results into (value, target, label) triples for delivery."""
+    def emit(self, results: list[TaskResult], mark: dict | None) -> list[TaskResult]:
+        """Route body results into a list of TaskResults for delivery."""
         raise NotImplementedError
 
 
 class OutputController(OutputControllerInterface):
     """Default: passes results through untouched; the node stamps the source label."""
 
-    def emit(self, results: list[TaskResult], mark: dict | None) -> list:
-        """Return each result as a raw (value, target, label) triple; label may be None."""
-        return [(r.value, r.node, r.label) for r in results]
+    def emit(self, results: list[TaskResult], mark: dict | None) -> list[TaskResult]:
+        """Pass results through unchanged; the node applies the default source label."""
+        return list(results)

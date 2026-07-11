@@ -84,7 +84,7 @@ def variants() -> None:
     # 6. output_map: per-link outgoing label (default = source label).
     s = Split(output_map={"hi": "H", "lo": "L"})()
     s.links["hi"] = s.links["lo"] = One()()
-    labels = {value: label for value, _, label in s.dispatch({"hi": 1, "lo": 2}, None)}
+    labels = {r.value: r.label for r in s.dispatch({"hi": 1, "lo": 2}, None)}
     print("6 output_map: hi->H, lo->L =>", labels)
     assert labels == {1: "H", 2: "L"}
 
