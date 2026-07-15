@@ -12,7 +12,7 @@ from .control import (
 )
 from .tasks import Input, Terminal, Tap
 from .executor import SyncExecutor, AsyncExecutor, ExecutorHandle
-from .fiber import FiberExecutionController, ExecutionRuntime
+from .fiber import FiberExecutionController, ExecutionRuntime, RemoteGateway
 
 __all__ = [
     "Task",
@@ -39,4 +39,5 @@ __all__ = [
     "ExecutorHandle",
     "FiberExecutionController",
     "ExecutionRuntime",
+    "RemoteGateway",
 ]

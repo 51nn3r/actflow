@@ -5,7 +5,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .core import Packet, Ready, TaskResult, Verdict, WaitUntil
-from .fiber import ExecutionRuntime
+from .fiber import ExecutionRuntime, RemoteGateway
 
 if TYPE_CHECKING:
     from .node import Node
@@ -96,9 +96,13 @@ class _Base:
         self._runs = 0
 
     def snapshot(self) -> dict:
-        """Counters: total runs, collected outputs, ready and waiting nodes."""
-        return {"runs": self._runs, "outputs": len(self.outputs),
+        """Counters: total runs, collected outputs, ready and waiting nodes (plus fiber state)."""
+        snap = {"runs": self._runs, "outputs": len(self.outputs),
                 "ready": len(self._ready), "waiting": len(self._waiting)}
+        if self.handle.runtime is not None:
+            snap.update(self.handle.runtime.snapshot())
+
+        return snap
 
     def _deliver(self, result: TaskResult) -> None:
         """Offer a packet to its target node and record the readiness verdict."""
@@ -170,10 +174,20 @@ class SyncExecutor(_Base):
 class AsyncExecutor(_Base):
     """Launches all ready bodies concurrently."""
 
-    def __init__(self, max_parallel: int = 8, fiber_workers: int = 0):
+    def __init__(
+        self,
+        max_parallel: int = 8,
+        fiber_workers: int = 0,
+        gateway: RemoteGateway | None = None,
+        max_inflight: int = 0,
+    ):
         super().__init__()
         self._sem = asyncio.Semaphore(max_parallel)
-        self._runtime = ExecutionRuntime(fiber_workers) if fiber_workers > 0 else None
+        self._runtime = (
+            ExecutionRuntime(fiber_workers, gateway=gateway, max_inflight=max_inflight)
+            if fiber_workers > 0
+            else None
+        )
         if self._runtime is not None:
             self.handle.runtime = self._runtime
 

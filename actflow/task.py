@@ -13,7 +13,7 @@ from .control import (
     LocalExecutionController,
 )
 from .core import Packet, TaskResult, _current_node, _current_handle
-from .fiber import LoopIORequest, OffloadRequest, SleepRequest
+from .fiber import LoopIORequest, OffloadRequest, RemoteRequest, SleepRequest
 from .node import Node
 
 
@@ -116,6 +116,10 @@ class Task:
     def offload(self, fn: Callable[[], Any]) -> OffloadRequest:
         """Await to run a blocking sync callable in the worker pool."""
         return OffloadRequest(fn)
+
+    def remote(self, service: str, operation: str, payload: Any) -> RemoteRequest:
+        """Await to send an operation to the remote gateway and get its reply."""
+        return RemoteRequest(service, operation, payload)
 
     def stop(self) -> None:
         """Stop the executor after current tick."""
