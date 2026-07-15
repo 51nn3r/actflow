@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .core import Packet, Ready, TaskResult, Verdict, WaitUntil
+from .fiber import ExecutionRuntime
 
 if TYPE_CHECKING:
     from .node import Node
@@ -16,6 +17,7 @@ class ExecutorHandle:
     def __init__(self, executor: _Base):
         self._executor = executor
         self._stop = False
+        self.runtime: ExecutionRuntime | None = None
 
     @property
     def stopped(self) -> bool:
@@ -168,9 +170,12 @@ class SyncExecutor(_Base):
 class AsyncExecutor(_Base):
     """Launches all ready bodies concurrently."""
 
-    def __init__(self, max_parallel: int = 8):
+    def __init__(self, max_parallel: int = 8, fiber_workers: int = 0):
         super().__init__()
         self._sem = asyncio.Semaphore(max_parallel)
+        self._runtime = ExecutionRuntime(fiber_workers) if fiber_workers > 0 else None
+        if self._runtime is not None:
+            self.handle.runtime = self._runtime
 
     async def run(self, start: Node, value: Any = None) -> list:
         """Drive the graph, running ready bodies concurrently up to max_parallel."""
@@ -213,6 +218,9 @@ class AsyncExecutor(_Base):
 
             if running:
                 await asyncio.gather(*running, return_exceptions=True)
+
+            if self._runtime is not None:
+                self._runtime.shutdown()
 
         return self.outputs
 

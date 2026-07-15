@@ -13,6 +13,7 @@ from .control import (
     LocalExecutionController,
 )
 from .core import Packet, TaskResult, _current_node, _current_handle
+from .fiber import LoopIORequest, OffloadRequest, SleepRequest
 from .node import Node
 
 
@@ -103,6 +104,18 @@ class Task:
     def to(self, name: str, value: Any, label: str | None = None) -> TaskResult:
         """Addressed result; useful for fan-out or explicit source label."""
         return TaskResult(value, _current_node.get().links[name], label)
+
+    def sleep(self, delay: float) -> SleepRequest:
+        """Await to pause a fiber body for `delay` seconds without holding a worker."""
+        return SleepRequest(delay)
+
+    def loop_io(self, factory: Callable[[], Any]) -> LoopIORequest:
+        """Await to run an async factory on the central loop (e.g. aiohttp)."""
+        return LoopIORequest(factory)
+
+    def offload(self, fn: Callable[[], Any]) -> OffloadRequest:
+        """Await to run a blocking sync callable in the worker pool."""
+        return OffloadRequest(fn)
 
     def stop(self) -> None:
         """Stop the executor after current tick."""
