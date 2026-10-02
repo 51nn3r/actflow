@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "actflow"
+version = "0.2.0"
+description = "Task-graph execution with a two-level node model (timed body + timeless controllers)."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "51nn3r"}]
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["actflow*"]
